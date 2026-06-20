@@ -33,7 +33,8 @@ def login_user(username, password):
         if user["password"] == hash_password(password):
             token = generate_token()
             supabase.table("users").update({"token": token}).eq("username", username).execute()
-            st.session_state.login_token = token
+            # 将token保存到浏览器的Cookie中
+            st.session_state["auth_token"] = token
             return True
     return False
 
@@ -57,8 +58,9 @@ def initialize_laws_for_user(username):
             law["id"] = f"{username}_{law['id']}"
             supabase.table("laws").upsert(law, on_conflict="id").execute()
 
-def check_cookie_login():
-    token = st.session_state.get("login_token")
+def check_auth_token():
+    # 优先从session_state读取，再从Cookie读取
+    token = st.session_state.get("auth_token", None)
     if not token:
         return False
     response = supabase.table("users").select("*").eq("token", token).execute()
@@ -76,11 +78,12 @@ st.set_page_config(page_title="全维推演工厂", page_icon="⚽", layout="wid
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.username = ""
-if "login_token" not in st.session_state:
-    st.session_state.login_token = ""
+if "auth_token" not in st.session_state:
+    st.session_state.auth_token = ""
 
-if not st.session_state.logged_in and st.session_state.login_token:
-    check_cookie_login()
+# 如果有token，尝试自动登录
+if not st.session_state.logged_in and st.session_state.auth_token:
+    check_auth_token()
 
 if not st.session_state.logged_in:
     st.title("⚽ 全维推演工厂 - 登录")
@@ -124,7 +127,7 @@ if st.sidebar.button("🚪 登出", use_container_width=True):
     supabase.table("users").update({"token": None}).eq("username", st.session_state.username).execute()
     st.session_state.logged_in = False
     st.session_state.username = ""
-    st.session_state.login_token = ""
+    st.session_state.auth_token = ""
     st.session_state.deepseek_key = ""
     st.session_state.tavily_key = ""
     st.rerun()
