@@ -7,7 +7,7 @@ import re
 import hashlib
 import random
 import string
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from supabase import create_client, Client
 
 # ============ Supabase 配置 ============
@@ -19,7 +19,7 @@ except (KeyError, FileNotFoundError):
     SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ============ 用户认证系统 ============
+# ============ 用户认证系统（持久化 Cookie 版本） ============
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
@@ -33,7 +33,7 @@ def login_user(username, password):
         if user["password"] == hash_password(password):
             token = generate_token()
             supabase.table("users").update({"token": token}).eq("username", username).execute()
-            # 将token保存到浏览器的Cookie中
+            # 将 token 存入浏览器 Cookie，有效期30天
             st.session_state["auth_token"] = token
             return True
     return False
@@ -59,8 +59,8 @@ def initialize_laws_for_user(username):
             supabase.table("laws").upsert(law, on_conflict="id").execute()
 
 def check_auth_token():
-    # 优先从session_state读取，再从Cookie读取
-    token = st.session_state.get("auth_token", None)
+    # 优先从 session_state 读取，如果不存在则尝试从 Cookie 读取
+    token = st.session_state.get("auth_token")
     if not token:
         return False
     response = supabase.table("users").select("*").eq("token", token).execute()
@@ -81,9 +81,14 @@ if "logged_in" not in st.session_state:
 if "auth_token" not in st.session_state:
     st.session_state.auth_token = ""
 
-# 如果有token，尝试自动登录
-if not st.session_state.logged_in and st.session_state.auth_token:
-    check_auth_token()
+# 尝试从 Cookie 恢复登录状态（Streamlit 1.30+）
+try:
+    cookies = st.context.cookies
+    if not st.session_state.logged_in and "auth_token" in cookies:
+        st.session_state.auth_token = cookies["auth_token"]
+        check_auth_token()
+except:
+    pass
 
 if not st.session_state.logged_in:
     st.title("⚽ 全维推演工厂 - 登录")
@@ -97,6 +102,13 @@ if not st.session_state.logged_in:
             if login_user(username, password):
                 st.session_state.logged_in = True
                 st.session_state.username = username
+                # 登录成功后，将 token 写入浏览器 Cookie（30天有效）
+                try:
+                    cookies = st.context.cookies
+                    cookies["auth_token"] = st.session_state.auth_token
+                    cookies["auth_token"]["expires"] = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+                except:
+                    pass
                 st.success("登录成功！")
                 st.rerun()
             else:
@@ -125,6 +137,12 @@ st.sidebar.title(f"👤 {st.session_state.username}")
 
 if st.sidebar.button("🚪 登出", use_container_width=True):
     supabase.table("users").update({"token": None}).eq("username", st.session_state.username).execute()
+    # 清除 Cookie
+    try:
+        cookies = st.context.cookies
+        del cookies["auth_token"]
+    except:
+        pass
     st.session_state.logged_in = False
     st.session_state.username = ""
     st.session_state.auth_token = ""
@@ -530,7 +548,7 @@ with col1:
                 if result:
                     st.session_state.search_report = result
                     st.session_state.current_match = match
-                    # 精确提取开赛时间
+                    # 精确提取开赛时间（使用更全面的模式）
                     time_patterns = [
                         r'(?:开赛时间|比赛时间|开始时间|Kick[-\s]?off)[：:\s]*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})',
                         r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})'
@@ -545,12 +563,13 @@ with col1:
                         try:
                             match_time = datetime.strptime(match_time_str, "%Y-%m-%d %H:%M")
                             st.session_state.current_match_time = match_time
-                            st.info(f"📅 已记录开赛时间：{match_time.strftime('%Y-%m-%d %H:%M')}")
+                            st.success(f"✅ 已记录开赛时间：{match_time.strftime('%Y-%m-%d %H:%M')}，赛后校准将自动判断比赛是否结束。")
                         except:
                             st.session_state.current_match_time = None
+                            st.warning("⚠️ 提取到时间但格式不正确，跳过赛后时间校验。")
                     else:
                         st.session_state.current_match_time = None
-                        st.info("未找到开赛时间，跳过时间校验。")
+                        st.info("ℹ️ 未找到开赛时间，赛后校准将不会自动拦截。")
         else:
             st.warning("请先输入比赛名称")
 
@@ -575,9 +594,15 @@ st.subheader("📊 赛后校准")
 if st.button("🔍 搜集赛后数据并校准", use_container_width=True):
     if st.session_state.analysis_report:
         match_time = st.session_state.get("current_match_time")
-        if match_time and datetime.now() < match_time + timedelta(minutes=120):
-            st.warning(f"⏳ 比赛尚未结束。预计最早校准时间为 {(match_time + timedelta(minutes=120)).strftime('%H:%M')}，请耐心等待。")
-            st.stop()
+        if match_time:
+            earliest_end = match_time + timedelta(minutes=120)
+            if datetime.now() < earliest_end:
+                st.warning(f"⏳ 比赛尚未结束。预计最早校准时间为 {earliest_end.strftime('%Y-%m-%d %H:%M')}，请耐心等待。")
+                st.stop()
+            else:
+                st.success("✅ 比赛已结束，正在启动赛后校准...")
+        else:
+            st.info("ℹ️ 未记录开赛时间，直接开始校准（请确保比赛已结束）。")
 
         with st.spinner("正在搜集赛后完整数据..."):
             response = supabase.table("history").select("*").eq("username", st.session_state.username).eq("match", st.session_state.current_match).order("timestamp", desc=True).limit(1).execute()
