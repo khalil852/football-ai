@@ -6,47 +6,45 @@ import sys
 import re
 import hashlib
 from datetime import datetime, timedelta
+from supabase import create_client, Client
+
+# ============ Supabase 配置 ============
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ============ 用户认证系统 ============
-USER_DB_FILE = "users.json"
-
-def load_users():
-    if os.path.exists(USER_DB_FILE):
-        with open(USER_DB_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    # 如果文件不存在，创建一个默认管理员账号
-    default_admin = {
-        "admin": {
-            "password": hashlib.sha256("admin123".encode()).hexdigest(),
-            "role": "admin"
-        }
-    }
-    save_users(default_admin)
-    return default_admin
-
-def save_users(users):
-    with open(USER_DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(users, f, ensure_ascii=False, indent=2)
-
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
 def login_user(username, password):
-    users = load_users()
-    if username in users:
-        return users[username]["password"] == hash_password(password)
+    response = supabase.table("users").select("*").eq("username", username).execute()
+    if response.data:
+        user = response.data[0]
+        return user["password"] == hash_password(password)
     return False
 
 def register_user(username, password):
-    users = load_users()
-    if username in users:
+    response = supabase.table("users").select("*").eq("username", username).execute()
+    if response.data:
         return False
-    users[username] = {
+    supabase.table("users").insert({
+        "username": username,
         "password": hash_password(password),
         "role": "user"
-    }
-    save_users(users)
+    }).execute()
+    # 为新用户初始化个人定律库（从管理员复制）
+    initialize_laws_for_user(username)
     return True
+
+def initialize_laws_for_user(username):
+    """为新用户复制一份管理员的默认定律库"""
+    response = supabase.table("laws").select("*").eq("username", "admin").execute()
+    if response.data:
+        for law in response.data:
+            law["username"] = username
+            law["id"] = f"{username}_{law['id']}"
+            supabase.table("laws").upsert(law, on_conflict="id").execute()
 
 # ============ 页面配置 ============
 st.set_page_config(page_title="全维推演工厂", page_icon="⚽", layout="wide")
@@ -91,7 +89,7 @@ if not st.session_state.logged_in:
     
     st.stop()
 
-# ============ 已登录状态，显示主界面 ============
+# ============ 已登录状态 ============
 st.sidebar.title(f"👤 {st.session_state.username}")
 
 if st.sidebar.button("🚪 登出", use_container_width=True):
@@ -101,34 +99,35 @@ if st.sidebar.button("🚪 登出", use_container_width=True):
     st.session_state.tavily_key = ""
     st.rerun()
 
-# ============ 持久化配置管理 ============
-CONFIG_FILE = f"config_{st.session_state.username}.json"
+# ============ 从 Supabase 读取 API Key ============
+def load_api_keys(username):
+    response = supabase.table("api_keys").select("*").eq("username", username).execute()
+    if response.data:
+        return response.data[0]
+    return {"deepseek_key": "", "tavily_key": ""}
 
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+def save_api_keys(username, deepseek_key, tavily_key):
+    supabase.table("api_keys").upsert({
+        "username": username,
+        "deepseek_key": deepseek_key,
+        "tavily_key": tavily_key
+    }, on_conflict="username").execute()
 
-def save_config(config):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(config, f, ensure_ascii=False, indent=2)
-
-config = load_config()
+api_keys = load_api_keys(st.session_state.username)
 
 # ============ 初始化 session_state ============
 if "deepseek_key" not in st.session_state:
-    st.session_state.deepseek_key = config.get("deepseek_key", "")
+    st.session_state.deepseek_key = api_keys.get("deepseek_key", "")
 if "tavily_key" not in st.session_state:
-    st.session_state.tavily_key = config.get("tavily_key", "")
+    st.session_state.tavily_key = api_keys.get("tavily_key", "")
 if "search_report" not in st.session_state:
     st.session_state.search_report = ""
 if "analysis_report" not in st.session_state:
     st.session_state.analysis_report = ""
 if "current_match" not in st.session_state:
     st.session_state.current_match = ""
-if "current_record_file" not in st.session_state:
-    st.session_state.current_record_file = ""
+if "current_record_id" not in st.session_state:
+    st.session_state.current_record_id = None
 if "current_match_time" not in st.session_state:
     st.session_state.current_match_time = None
 
@@ -142,22 +141,17 @@ with st.sidebar.expander("🔑 API Key 管理", expanded=True):
         value=st.session_state.deepseek_key,
         help="在 platform.deepseek.com 获取"
     )
-    
-    # Tavily Key：优先使用用户自己输入的，否则使用系统默认 Key
     tavily_key = st.text_input(
         "Tavily API Key（可选）",
         type="password",
         value=st.session_state.tavily_key,
         help="可选。留空则使用系统默认的共享 Key。"
     )
-    
     if st.button("💾 保存 Key", use_container_width=True):
         if deepseek_key.strip():
             st.session_state.deepseek_key = deepseek_key.strip()
             st.session_state.tavily_key = tavily_key.strip()
-            config["deepseek_key"] = deepseek_key.strip()
-            config["tavily_key"] = tavily_key.strip()
-            save_config(config)
+            save_api_keys(st.session_state.username, deepseek_key.strip(), tavily_key.strip())
             st.success("API Key 已永久保存！")
         else:
             st.warning("请至少输入 DeepSeek API Key。")
@@ -184,7 +178,6 @@ with st.sidebar.expander("💰 购买API Token", expanded=False):
 # ============ 从 session_state 读取密钥 ============
 API_KEY = st.session_state.deepseek_key
 
-# 获取 Tavily Key：优先用户自己的，否则使用 Secrets 中的默认 Key，再否则为空
 if st.session_state.tavily_key:
     TAVILY_API_KEY = st.session_state.tavily_key
 else:
@@ -201,24 +194,46 @@ def resource_path(relative_path):
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.abspath("."), relative_path)
 
-# 灵活读取核心文件：云端从 Secrets 读，本地从文件读
+# 推演引擎核心指令：云端从 Secrets 读，本地从文件读
 try:
     system_prompt_analysis = st.secrets["analysis_prompt"]
 except (KeyError, FileNotFoundError):
     with open(resource_path("prompt_analysis.md"), "r", encoding="utf-8") as f:
         system_prompt_analysis = f.read()
 
-try:
-    laws_data = json.loads(st.secrets["laws_json"])
-except (KeyError, FileNotFoundError):
-    with open("laws.json", "r", encoding="utf-8") as f:
-        laws_data = json.load(f)
-
-# 搜索和校准提示词仍从文件读取（可以上传到 GitHub）
+# 搜索和校准提示词仍从文件读取
 with open(resource_path("prompt_search.md"), "r", encoding="utf-8") as f:
     system_prompt_search = f.read()
 with open(resource_path("prompt_calibrate.md"), "r", encoding="utf-8") as f:
     system_prompt_calibrate = f.read()
+
+# ============ 从 Supabase 加载定律库（多用户版本） ============
+def load_laws_from_supabase():
+    """从Supabase读取当前用户的定律（以及管理员的共享定律）"""
+    try:
+        # 读取当前用户的定律 + 管理员发布的共享定律
+        response = supabase.table("laws").select("*").or_(
+            f"username.eq.{st.session_state.username},username.eq.admin"
+        ).execute()
+        if response.data:
+            return {"laws": response.data}
+        return {"laws": []}
+    except Exception as e:
+        st.error(f"从数据库加载定律失败：{e}")
+        return {"laws": []}
+
+def save_law_to_supabase(law):
+    """保存或更新单条定律到Supabase（标记为当前用户）"""
+    try:
+        law["username"] = st.session_state.username
+        supabase.table("laws").upsert(law, on_conflict="id").execute()
+        return True
+    except Exception as e:
+        st.error(f"保存定律失败：{e}")
+        return False
+
+# 初始化时从Supabase加载定律库
+laws_data = load_laws_from_supabase()
 
 def call_deepseek(system_prompt, user_query, enable_search=False, search_mode="pre_match", summarize=True):
     if not API_KEY:
@@ -315,35 +330,27 @@ def call_deepseek(system_prompt, user_query, enable_search=False, search_mode="p
         return ""
     return data2['choices'][0]['message'].get('content', '')
 
+# ============ 历史记录管理（Supabase） ============
 def save_record(match, search_report, analysis_report):
     record = {
+        "username": st.session_state.username,
         "match": match,
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "search_report": search_report,
         "analysis_report": analysis_report,
         "calibration": None
     }
-    filename = f"history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(record, f, ensure_ascii=False, indent=2)
-    return filename
+    supabase.table("history").insert(record).execute()
 
 def load_history():
-    records = []
-    for file in os.listdir("."):
-        if file.startswith("history_") and file.endswith(".json"):
-            with open(file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                data["filename"] = file
-                records.append(data)
-    records.sort(key=lambda x: x["timestamp"], reverse=True)
-    return records
+    response = supabase.table("history").select("*").eq("username", st.session_state.username).order("timestamp", desc=True).execute()
+    return response.data
 
 def load_record_to_session(record):
     st.session_state.search_report = record["search_report"]
     st.session_state.analysis_report = record["analysis_report"]
     st.session_state.current_match = record["match"]
-    st.session_state.current_record_file = record["filename"]
+    st.session_state.current_record_id = record["id"]
 
 def calibrate_record(record):
     search_query = f"请联网搜索 {record['match']} 的赛后完整数据（比分、进球、技术统计、关键事件等）。"
@@ -420,11 +427,12 @@ def calibrate_record(record):
     except Exception:
         pass
 
-    record["calibration"] = calibration_report
-    record["pending_laws"] = new_laws
-    record["pending_modifications"] = modified_laws
-    with open(record["filename"], "w", encoding="utf-8") as f:
-        json.dump(record, f, ensure_ascii=False, indent=2)
+    # 更新数据库记录
+    supabase.table("history").update({
+        "calibration": calibration_report,
+        "pending_laws": json.dumps(new_laws) if new_laws else None,
+        "pending_modifications": json.dumps(modified_laws) if modified_laws else None
+    }).eq("id", record["id"]).execute()
 
     return True, calibration_report, new_laws, modified_laws
 
@@ -513,9 +521,8 @@ with col2:
                 result = call_deepseek(system_prompt_analysis, analysis_query, enable_search=False)
                 if result:
                     st.session_state.analysis_report = result
-                    filename = save_record(match, st.session_state.search_report, st.session_state.analysis_report)
-                    st.session_state.current_record_file = filename
-                    st.success(f"推演记录已保存至 {filename}")
+                    save_record(match, st.session_state.search_report, st.session_state.analysis_report)
+                    st.success("推演记录已保存至云端数据库。")
         elif not match:
             st.warning("请先输入比赛名称")
         else:
@@ -525,7 +532,7 @@ with col2:
 st.markdown("---")
 st.subheader("📊 赛后校准")
 if st.button("🔍 搜集赛后数据并校准", use_container_width=True):
-    if st.session_state.analysis_report and st.session_state.current_record_file:
+    if st.session_state.analysis_report:
         match_time = st.session_state.get("current_match_time")
         if match_time:
             earliest_end = match_time + timedelta(minutes=120)
@@ -534,15 +541,14 @@ if st.button("🔍 搜集赛后数据并校准", use_container_width=True):
                 st.stop()
 
         with st.spinner("正在搜集赛后完整数据..."):
-            record_file = st.session_state.current_record_file
-            if os.path.exists(record_file):
-                with open(record_file, "r", encoding="utf-8") as f:
-                    record = json.load(f)
+            response = supabase.table("history").select("*").eq("username", st.session_state.username).eq("match", st.session_state.current_match).order("timestamp", desc=True).limit(1).execute()
+            if response.data:
+                record = response.data[0]
                 success, calibration_report, new_laws, modified_laws = calibrate_record(record)
 
                 if success:
                     st.markdown(calibration_report)
-                    st.success(f"校准报告已保存至 {record_file}")
+                    st.success("校准报告已保存至云端数据库。")
 
                     if new_laws:
                         st.markdown("### 📝 待确认的新定律/补丁")
@@ -559,10 +565,11 @@ if st.button("🔍 搜集赛后数据并校准", use_container_width=True):
                                 st.write(f"· λ值修正：{law.get('lambda_effect', '')}")
 
                         if st.button("✅ 确认添加新定律"):
-                            # 更新内存中的 laws_data，并写回文件（仅本地有效，云端需保存到 Secrets）
-                            laws_data["laws"].extend(selected_new_laws)
-                            with open("laws.json", "w", encoding="utf-8") as f:
-                                json.dump(laws_data, f, ensure_ascii=False, indent=2)
+                            for i, law in enumerate(selected_new_laws):
+                                law["id"] = f"new_{datetime.now().strftime('%Y%m%d%H%M%S')}_{i}"
+                                law["status"] = "active"
+                                save_law_to_supabase(law)
+                            laws_data = load_laws_from_supabase()
                             st.success(f"已添加 {len(selected_new_laws)} 条新定律！")
                             st.rerun()
 
@@ -587,11 +594,11 @@ if st.button("🔍 搜集赛后数据并校准", use_container_width=True):
                                     if str(law["id"]) == str(mod["id"]):
                                         law["name"] = mod["name"]
                                         law["content"] = mod["content"]
-                                        law["trigger"] = mod["trigger"]
-                                        law["lambda_effect"] = mod["lambda_effect"]
+                                        law["trigger_condition"] = mod.get("trigger", mod.get("trigger_condition", ""))
+                                        law["lambda_effect"] = mod.get("lambda_effect", "")
+                                        save_law_to_supabase(law)
                                         break
-                            with open("laws.json", "w", encoding="utf-8") as f:
-                                json.dump(laws_data, f, ensure_ascii=False, indent=2)
+                            laws_data = load_laws_from_supabase()
                             st.success(f"已应用 {len(selected_modifications)} 条修改！")
                             st.rerun()
 
@@ -603,7 +610,7 @@ if st.button("🔍 搜集赛后数据并校准", use_container_width=True):
                 else:
                     st.warning(calibration_report)
             else:
-                st.warning("未找到对应的推演记录文件。")
+                st.warning("未找到对应的推演记录。请先进行推演并保存记录。")
     elif not st.session_state.analysis_report:
         st.warning("请先进行推演")
     else:
@@ -614,7 +621,7 @@ st.markdown("---")
 st.subheader("⚙️ 定理卡牌控制台")
 
 with st.expander("查看/管理所有定律", expanded=False):
-    st.info("💡 开关按钮用于控制该定律是否参与赛前推演。关闭后，模型将不会调用该定律。所有修改会自动保存。")
+    st.info("💡 开关按钮用于控制该定律是否参与赛前推演。关闭后，模型将不会调用该定律。所有修改会自动保存到云端数据库。")
 
     if laws_data["laws"]:
         for i, law in enumerate(laws_data["laws"]):
@@ -629,15 +636,14 @@ with st.expander("查看/管理所有定律", expanded=False):
                 )
                 if new_status != current_status:
                     law["status"] = "active" if new_status else "inactive"
-                    with open("laws.json", "w", encoding="utf-8") as f:
-                        json.dump(laws_data, f, ensure_ascii=False, indent=2)
+                    save_law_to_supabase(law)
                     st.rerun()
 
             with col2:
                 status_emoji = "🟢" if law.get("status", "active") == "active" else "🔴"
                 st.markdown(f"**{status_emoji} {law['name']}**")
                 st.markdown(f"· {law['content']}")
-                st.markdown(f"· 触发条件：{law.get('trigger', '暂无')}")
+                st.markdown(f"· 触发条件：{law.get('trigger_condition', '暂无')}")
                 st.markdown(f"· λ值修正：{law.get('lambda_effect', '暂无')}")
             st.divider()
     else:
@@ -707,21 +713,17 @@ else:
                 st.success(f"已加载 {rec['match']} 的推演记录，可以查看或校准。")
 
             if st.button(f"🗑️ 删除此记录", key=f"delete_{i}"):
-                filename = rec.get("filename")
-                if filename and os.path.exists(filename):
-                    os.remove(filename)
-                    st.success(f"已删除 {rec['match']} 的记录。")
-                    st.rerun()
-                else:
-                    st.warning("文件不存在，无法删除。")
+                supabase.table("history").delete().eq("id", rec["id"]).execute()
+                st.success(f"已删除 {rec['match']} 的记录。")
+                st.rerun()
 
             if rec.get("calibration"):
                 if st.button(f"🗑️ 删除校准数据", key=f"clear_cal_{i}"):
-                    rec["calibration"] = None
-                    rec["pending_laws"] = []
-                    rec["pending_modifications"] = []
-                    with open(rec["filename"], "w", encoding="utf-8") as f:
-                        json.dump(rec, f, ensure_ascii=False, indent=2)
+                    supabase.table("history").update({
+                        "calibration": None,
+                        "pending_laws": None,
+                        "pending_modifications": None
+                    }).eq("id", rec["id"]).execute()
                     st.success(f"{rec['match']} 的校准数据已清空。")
                     st.rerun()
 
@@ -747,9 +749,11 @@ else:
                                         st.write(f"· 触发条件：{law.get('trigger', '')}")
                                         st.write(f"· λ值修正：{law.get('lambda_effect', '')}")
                                 if st.button("✅ 确认添加新定律", key=f"confirm_new_{i}"):
-                                    laws_data["laws"].extend(selected_new_laws)
-                                    with open("laws.json", "w", encoding="utf-8") as f:
-                                        json.dump(laws_data, f, ensure_ascii=False, indent=2)
+                                    for j, law in enumerate(selected_new_laws):
+                                        law["id"] = f"new_{datetime.now().strftime('%Y%m%d%H%M%S')}_{i}_{j}"
+                                        law["status"] = "active"
+                                        save_law_to_supabase(law)
+                                    laws_data = load_laws_from_supabase()
                                     st.success(f"已添加 {len(selected_new_laws)} 条新定律！")
                                     st.rerun()
 
@@ -773,11 +777,11 @@ else:
                                             if str(law["id"]) == str(mod["id"]):
                                                 law["name"] = mod["name"]
                                                 law["content"] = mod["content"]
-                                                law["trigger"] = mod["trigger"]
-                                                law["lambda_effect"] = mod["lambda_effect"]
+                                                law["trigger_condition"] = mod.get("trigger", mod.get("trigger_condition", ""))
+                                                law["lambda_effect"] = mod.get("lambda_effect", "")
+                                                save_law_to_supabase(law)
                                                 break
-                                    with open("laws.json", "w", encoding="utf-8") as f:
-                                        json.dump(laws_data, f, ensure_ascii=False, indent=2)
+                                    laws_data = load_laws_from_supabase()
                                     st.success(f"已应用 {len(selected_modifications)} 条修改！")
                                     st.rerun()
 
