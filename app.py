@@ -19,7 +19,7 @@ except (KeyError, FileNotFoundError):
     SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ============ 用户认证系统（持久化 Cookie 版本） ============
+# ============ 用户认证系统 ============
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
@@ -33,7 +33,6 @@ def login_user(username, password):
         if user["password"] == hash_password(password):
             token = generate_token()
             supabase.table("users").update({"token": token}).eq("username", username).execute()
-            # 将 token 存入浏览器 Cookie，有效期30天
             st.session_state["auth_token"] = token
             return True
     return False
@@ -59,7 +58,6 @@ def initialize_laws_for_user(username):
             supabase.table("laws").upsert(law, on_conflict="id").execute()
 
 def check_auth_token():
-    # 优先从 session_state 读取，如果不存在则尝试从 Cookie 读取
     token = st.session_state.get("auth_token")
     if not token:
         return False
@@ -71,6 +69,24 @@ def check_auth_token():
         return True
     return False
 
+def perform_logout():
+    """执行完整的登出流程"""
+    # 1. 清除数据库中的token
+    if st.session_state.get("username"):
+        supabase.table("users").update({"token": None}).eq("username", st.session_state.username).execute()
+    
+    # 2. 清除所有session_state
+    keys_to_clear = [
+        "logged_in", "username", "auth_token", "deepseek_key", "tavily_key",
+        "search_report", "analysis_report", "current_match", "current_record_id", "current_match_time"
+    ]
+    for key in keys_to_clear:
+        if key in st.session_state:
+            del st.session_state[key]
+    
+    # 3. 强制刷新页面，清除所有残留状态
+    st.rerun()
+
 # ============ 页面配置 ============
 st.set_page_config(page_title="全维推演工厂", page_icon="⚽", layout="wide")
 
@@ -81,14 +97,9 @@ if "logged_in" not in st.session_state:
 if "auth_token" not in st.session_state:
     st.session_state.auth_token = ""
 
-# 尝试从 Cookie 恢复登录状态（Streamlit 1.30+）
-try:
-    cookies = st.context.cookies
-    if not st.session_state.logged_in and "auth_token" in cookies:
-        st.session_state.auth_token = cookies["auth_token"]
-        check_auth_token()
-except:
-    pass
+# 尝试从Cookie恢复登录
+if not st.session_state.logged_in and st.session_state.auth_token:
+    check_auth_token()
 
 if not st.session_state.logged_in:
     st.title("⚽ 全维推演工厂 - 登录")
@@ -102,13 +113,6 @@ if not st.session_state.logged_in:
             if login_user(username, password):
                 st.session_state.logged_in = True
                 st.session_state.username = username
-                # 登录成功后，将 token 写入浏览器 Cookie（30天有效）
-                try:
-                    cookies = st.context.cookies
-                    cookies["auth_token"] = st.session_state.auth_token
-                    cookies["auth_token"]["expires"] = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
-                except:
-                    pass
                 st.success("登录成功！")
                 st.rerun()
             else:
@@ -136,19 +140,7 @@ if not st.session_state.logged_in:
 st.sidebar.title(f"👤 {st.session_state.username}")
 
 if st.sidebar.button("🚪 登出", use_container_width=True):
-    supabase.table("users").update({"token": None}).eq("username", st.session_state.username).execute()
-    # 清除 Cookie
-    try:
-        cookies = st.context.cookies
-        del cookies["auth_token"]
-    except:
-        pass
-    st.session_state.logged_in = False
-    st.session_state.username = ""
-    st.session_state.auth_token = ""
-    st.session_state.deepseek_key = ""
-    st.session_state.tavily_key = ""
-    st.rerun()
+    perform_logout()
 
 # ============ 从 Supabase 读取 API Key ============
 def load_api_keys(username):
@@ -245,20 +237,18 @@ def resource_path(relative_path):
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.abspath("."), relative_path)
 
-# 推演引擎核心指令：云端从 Secrets 读，本地从文件读
 try:
     system_prompt_analysis = st.secrets["analysis_prompt"]
 except (KeyError, FileNotFoundError):
     with open(resource_path("prompt_analysis.md"), "r", encoding="utf-8") as f:
         system_prompt_analysis = f.read()
 
-# 搜索和校准提示词仍从文件读取
 with open(resource_path("prompt_search.md"), "r", encoding="utf-8") as f:
     system_prompt_search = f.read()
 with open(resource_path("prompt_calibrate.md"), "r", encoding="utf-8") as f:
     system_prompt_calibrate = f.read()
 
-# ============ 从 Supabase 加载定律库（多用户版本） ============
+# ============ 从 Supabase 加载定律库 ============
 def load_laws_from_supabase():
     try:
         response = supabase.table("laws").select("*").or_(
@@ -281,6 +271,46 @@ def save_law_to_supabase(law):
         return False
 
 laws_data = load_laws_from_supabase()
+
+# ============ 时间提取工具函数 ============
+def extract_match_time(report_text):
+    time_patterns = [
+        r'(?:开赛时间|比赛时间|开始时间|Kick[-\s]?off)[：:\s]*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})',
+        r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})'
+    ]
+    for pattern in time_patterns:
+        time_match = re.search(pattern, report_text, re.IGNORECASE)
+        if time_match:
+            return time_match.group(1) if time_match.lastindex else time_match.group(0)
+    return None
+
+def get_match_status(match_time_str):
+    if not match_time_str:
+        return "未知", "⚪"
+    try:
+        match_time = datetime.strptime(match_time_str, "%Y-%m-%d %H:%M")
+        now = datetime.now()
+        if now < match_time:
+            return "未开赛", "🔵"
+        elif now < match_time + timedelta(minutes=120):
+            return "进行中", "🟡"
+        else:
+            return "已结束", "🟢"
+    except:
+        return "未知", "⚪"
+
+def can_calibrate(match_time_str):
+    if not match_time_str:
+        return True, "未找到开赛时间，将直接开始校准。"
+    try:
+        match_time = datetime.strptime(match_time_str, "%Y-%m-%d %H:%M")
+        if datetime.now() < match_time + timedelta(minutes=120):
+            earliest_end = match_time + timedelta(minutes=120)
+            return False, f"⏳ 比赛尚未结束，预计 {earliest_end.strftime('%Y-%m-%d %H:%M')} 后可校准。"
+        else:
+            return True, "比赛已结束，可以校准。"
+    except:
+        return True, "无法解析开赛时间，将直接开始校准。"
 
 def call_deepseek(system_prompt, user_query, enable_search=False, search_mode="pre_match", summarize=True):
     if not API_KEY:
@@ -377,15 +407,17 @@ def call_deepseek(system_prompt, user_query, enable_search=False, search_mode="p
         return ""
     return data2['choices'][0]['message'].get('content', '')
 
-# ============ 历史记录管理（Supabase） ============
+# ============ 历史记录管理 ============
 def save_record(match, search_report, analysis_report):
+    match_time = extract_match_time(search_report)
     record = {
         "username": st.session_state.username,
         "match": match,
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "search_report": search_report,
         "analysis_report": analysis_report,
-        "calibration": None
+        "calibration": None,
+        "match_time": match_time
     }
     supabase.table("history").insert(record).execute()
 
@@ -398,6 +430,7 @@ def load_record_to_session(record):
     st.session_state.analysis_report = record["analysis_report"]
     st.session_state.current_match = record["match"]
     st.session_state.current_record_id = record["id"]
+    st.session_state.current_match_time = record.get("match_time")
 
 def calibrate_record(record):
     search_query = f"请联网搜索 {record['match']} 的赛后完整数据（比分、进球、技术统计、关键事件等）。"
@@ -484,23 +517,33 @@ def calibrate_record(record):
 
 def calibrate_all_uncalibrated():
     history = load_history()
-    uncalibrated = [r for r in history if not r.get("calibration")]
-    if not uncalibrated:
-        return 0, 0
-
+    skipped_count = 0
+    calibrated_count = 0
     progress_bar = st.progress(0)
     status_text = st.empty()
-    calibrated_count = 0
-    skipped_count = 0
+    
+    uncalibrated = [r for r in history if not r.get("calibration")]
+    if not uncalibrated:
+        status_text.text("没有未校准的记录。")
+        progress_bar.empty()
+        return 0, 0
+
     for i, rec in enumerate(uncalibrated):
-        status_text.text(f"正在校准：{rec['match']} ({i+1}/{len(uncalibrated)})")
-        success, report, _, _ = calibrate_record(rec)
-        if success:
-            calibrated_count += 1
-        else:
+        status_text.text(f"正在检查：{rec['match']} ({i+1}/{len(uncalibrated)})")
+        can_cal, msg = can_calibrate(rec.get("match_time"))
+        if not can_cal:
+            st.warning(f"⏭️ {rec['match']}：{msg}")
             skipped_count += 1
-            st.warning(f"⏭️ {rec['match']} 比赛尚未开始或数据未更新，已跳过校准。")
+        else:
+            status_text.text(f"正在校准：{rec['match']} ({i+1}/{len(uncalibrated)})")
+            success, report, _, _ = calibrate_record(rec)
+            if success:
+                calibrated_count += 1
+            else:
+                skipped_count += 1
+                st.warning(f"⏭️ {rec['match']}：{report}")
         progress_bar.progress((i + 1) / len(uncalibrated))
+    
     status_text.text("所有未校准记录处理完毕！")
     progress_bar.empty()
     return calibrated_count, skipped_count
@@ -542,41 +585,25 @@ col1, col2, col3 = st.columns(3)
 with col1:
     if st.button("🔍 搜集赛前数据", use_container_width=True):
         if match:
-            with st.spinner("正在搜集赛前数据..."):
+            with st.spinner("正在搜索并汇总赛前数据，请耐心等待..."):
                 search_query = f"请为 {match} 搜集赛前关键信息，并严格按照模板格式输出。"
                 result = call_deepseek(system_prompt_search, search_query, enable_search=True)
                 if result:
                     st.session_state.search_report = result
                     st.session_state.current_match = match
-                    # 精确提取开赛时间（使用更全面的模式）
-                    time_patterns = [
-                        r'(?:开赛时间|比赛时间|开始时间|Kick[-\s]?off)[：:\s]*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})',
-                        r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})'
-                    ]
-                    match_time_str = None
-                    for pattern in time_patterns:
-                        time_match = re.search(pattern, result, re.IGNORECASE)
-                        if time_match:
-                            match_time_str = time_match.group(1) if time_match.lastindex else time_match.group(0)
-                            break
-                    if match_time_str:
-                        try:
-                            match_time = datetime.strptime(match_time_str, "%Y-%m-%d %H:%M")
-                            st.session_state.current_match_time = match_time
-                            st.success(f"✅ 已记录开赛时间：{match_time.strftime('%Y-%m-%d %H:%M')}，赛后校准将自动判断比赛是否结束。")
-                        except:
-                            st.session_state.current_match_time = None
-                            st.warning("⚠️ 提取到时间但格式不正确，跳过赛后时间校验。")
+                    extracted_time = extract_match_time(result)
+                    st.session_state.current_match_time = extracted_time
+                    if extracted_time:
+                        st.success(f"✅ 开赛时间：{extracted_time}")
                     else:
-                        st.session_state.current_match_time = None
-                        st.info("ℹ️ 未找到开赛时间，赛后校准将不会自动拦截。")
+                        st.info("ℹ️ 未提取到开赛时间，赛后校准将不会拦截。")
         else:
             st.warning("请先输入比赛名称")
 
 with col2:
     if st.button("🧠 开始全维推演", use_container_width=True):
         if match and st.session_state.search_report:
-            with st.spinner("正在进行全维推演..."):
+            with st.spinner("正在进行全维推演，请耐心等待..."):
                 analysis_query = f"请基于以下赛前数据，对 {match} 进行推演。\n\n{st.session_state.search_report}"
                 result = call_deepseek(system_prompt_analysis, analysis_query, enable_search=False)
                 if result:
@@ -588,23 +615,28 @@ with col2:
         else:
             st.warning("请先搜集赛前数据")
 
+# ============ 实时结果显示区域 ============
+if st.session_state.search_report:
+    with st.expander("📡 信息雷达：赛前数据报告", expanded=True):
+        st.markdown(st.session_state.search_report)
+
+if st.session_state.analysis_report:
+    with st.expander("🧠 推演引擎：全维推演报告", expanded=True):
+        st.markdown(st.session_state.analysis_report)
+
 # ============ 赛后校准 ============
 st.markdown("---")
 st.subheader("📊 赛后校准")
 if st.button("🔍 搜集赛后数据并校准", use_container_width=True):
     if st.session_state.analysis_report:
         match_time = st.session_state.get("current_match_time")
-        if match_time:
-            earliest_end = match_time + timedelta(minutes=120)
-            if datetime.now() < earliest_end:
-                st.warning(f"⏳ 比赛尚未结束。预计最早校准时间为 {earliest_end.strftime('%Y-%m-%d %H:%M')}，请耐心等待。")
-                st.stop()
-            else:
-                st.success("✅ 比赛已结束，正在启动赛后校准...")
-        else:
-            st.info("ℹ️ 未记录开赛时间，直接开始校准（请确保比赛已结束）。")
+        can_cal, msg = can_calibrate(match_time)
+        if not can_cal:
+            st.warning(msg)
+            st.stop()
+        st.success(msg)
 
-        with st.spinner("正在搜集赛后完整数据..."):
+        with st.spinner("正在搜集赛后完整数据，请耐心等待..."):
             response = supabase.table("history").select("*").eq("username", st.session_state.username).eq("match", st.session_state.current_match).order("timestamp", desc=True).limit(1).execute()
             if response.data:
                 record = response.data[0]
@@ -751,26 +783,30 @@ st.markdown("---")
 st.subheader("📚 历史推演记录")
 
 if st.button("🔧 一键校准所有未校准记录", use_container_width=True):
-    cali_count, skip_count = calibrate_all_uncalibrated()
-    if cali_count == 0 and skip_count == 0:
-        st.info("所有记录都已被校准，暂无未校准记录。")
-    else:
-        msg = f"成功校准 {cali_count} 条记录。"
-        if skip_count > 0:
-            msg += f" 跳过 {skip_count} 条未开始比赛。"
-        st.success(msg + " 页面将自动刷新。")
-        st.rerun()
+    with st.spinner("正在批量校准..."):
+        cali_count, skip_count = calibrate_all_uncalibrated()
+        if cali_count == 0 and skip_count == 0:
+            st.info("所有记录都已被校准或尚未到可校准时间。")
+        else:
+            msg = f"成功校准 {cali_count} 条记录。"
+            if skip_count > 0:
+                msg += f" 跳过 {skip_count} 条（未到可校准时间或校准失败）。"
+            st.success(msg)
+            st.rerun()
 
 history = load_history()
 if not history:
     st.info("暂无推演记录。")
 else:
     for i, rec in enumerate(history):
-        title = f"{rec['match']} | {rec['timestamp']}"
+        match_time = rec.get("match_time")
+        status_text, status_icon = get_match_status(match_time)
+        title = f"{status_icon} {rec['match']} | {rec['timestamp']} | {status_text}"
         if rec.get("calibration"):
             title += " | 🟢 已校准"
         else:
             title += " | ⚪ 未校准"
+        
         with st.expander(title, expanded=False):
             if st.button(f"📂 加载此记录", key=f"load_{i}"):
                 load_record_to_session(rec)
@@ -792,68 +828,69 @@ else:
                     st.rerun()
 
             if not rec.get("calibration"):
-                if st.button(f"🔍 校准此记录", key=f"calibrate_{i}"):
-                    with st.spinner(f"正在校准 {rec['match']}..."):
-                        success, report, new_laws, modified_laws = calibrate_record(rec)
-                        if success:
-                            st.success(f"{rec['match']} 校准成功！")
-                            st.markdown(report)
-
-                            if new_laws:
-                                st.markdown("### 📝 待确认的新定律/补丁")
-                                selected_new_laws = []
-                                for j, law in enumerate(new_laws):
-                                    col_check, col_law = st.columns([1, 10])
-                                    with col_check:
-                                        if st.checkbox("", key=f"hist_new_law_{i}_{j}", value=True):
-                                            selected_new_laws.append(law)
-                                    with col_law:
-                                        st.write(f"**{law.get('name', '新定律')}**")
-                                        st.write(f"· {law.get('content', '')}")
-                                        st.write(f"· 触发条件：{law.get('trigger', '')}")
-                                        st.write(f"· λ值修正：{law.get('lambda_effect', '')}")
-                                if st.button("✅ 确认添加新定律", key=f"confirm_new_{i}"):
-                                    for j, law in enumerate(selected_new_laws):
-                                        law["id"] = f"new_{datetime.now().strftime('%Y%m%d%H%M%S')}_{i}_{j}"
-                                        law["status"] = "active"
-                                        save_law_to_supabase(law)
-                                    laws_data = load_laws_from_supabase()
-                                    st.success(f"已添加 {len(selected_new_laws)} 条新定律！")
-                                    st.rerun()
-
-                            if modified_laws:
-                                st.markdown("### ✏️ 待确认的修改建议")
-                                selected_modifications = []
-                                for j, mod in enumerate(modified_laws):
-                                    col_check, col_law = st.columns([1, 10])
-                                    with col_check:
-                                        if st.checkbox("", key=f"hist_mod_law_{i}_{j}", value=True):
-                                            selected_modifications.append(mod)
-                                    with col_law:
-                                        st.write(f"**修改 ID: {mod.get('id', '未知')}**")
-                                        st.write(f"· 新名称：{mod.get('name', '')}")
-                                        st.write(f"· 新逻辑：{mod.get('content', '')}")
-                                        st.write(f"· 新触发条件：{mod.get('trigger', '')}")
-                                        st.write(f"· 新λ值修正：{mod.get('lambda_effect', '')}")
-                                if st.button("✅ 确认应用修改", key=f"confirm_mod_{i}"):
-                                    for mod in selected_modifications:
-                                        for law in laws_data["laws"]:
-                                            if str(law["id"]) == str(mod["id"]):
-                                                law["name"] = mod["name"]
-                                                law["content"] = mod["content"]
-                                                law["trigger_condition"] = mod.get("trigger", mod.get("trigger_condition", ""))
-                                                law["lambda_effect"] = mod.get("lambda_effect", "")
-                                                save_law_to_supabase(law)
-                                                break
-                                    laws_data = load_laws_from_supabase()
-                                    st.success(f"已应用 {len(selected_modifications)} 条修改！")
-                                    st.rerun()
-
-                            if not new_laws and not modified_laws:
-                                st.info("本次校准未提炼出新定律或修改建议。")
-                            st.rerun()
-                        else:
-                            st.warning(report)
+                can_cal, cal_msg = can_calibrate(match_time)
+                if can_cal:
+                    if st.button(f"🔍 校准此记录", key=f"calibrate_{i}"):
+                        with st.spinner(f"正在校准 {rec['match']}..."):
+                            success, report, new_laws, modified_laws = calibrate_record(rec)
+                            if success:
+                                st.success(f"{rec['match']} 校准成功！")
+                                st.markdown(report)
+                                if new_laws:
+                                    st.markdown("### 📝 待确认的新定律/补丁")
+                                    selected_new_laws = []
+                                    for j, law in enumerate(new_laws):
+                                        col_check, col_law = st.columns([1, 10])
+                                        with col_check:
+                                            if st.checkbox("", key=f"hist_new_law_{i}_{j}", value=True):
+                                                selected_new_laws.append(law)
+                                        with col_law:
+                                            st.write(f"**{law.get('name', '新定律')}**")
+                                            st.write(f"· {law.get('content', '')}")
+                                            st.write(f"· 触发条件：{law.get('trigger', '')}")
+                                            st.write(f"· λ值修正：{law.get('lambda_effect', '')}")
+                                    if st.button("✅ 确认添加新定律", key=f"confirm_new_{i}"):
+                                        for j, law in enumerate(selected_new_laws):
+                                            law["id"] = f"new_{datetime.now().strftime('%Y%m%d%H%M%S')}_{i}_{j}"
+                                            law["status"] = "active"
+                                            save_law_to_supabase(law)
+                                        laws_data = load_laws_from_supabase()
+                                        st.success(f"已添加 {len(selected_new_laws)} 条新定律！")
+                                        st.rerun()
+                                if modified_laws:
+                                    st.markdown("### ✏️ 待确认的修改建议")
+                                    selected_modifications = []
+                                    for j, mod in enumerate(modified_laws):
+                                        col_check, col_law = st.columns([1, 10])
+                                        with col_check:
+                                            if st.checkbox("", key=f"hist_mod_law_{i}_{j}", value=True):
+                                                selected_modifications.append(mod)
+                                        with col_law:
+                                            st.write(f"**修改 ID: {mod.get('id', '未知')}**")
+                                            st.write(f"· 新名称：{mod.get('name', '')}")
+                                            st.write(f"· 新逻辑：{mod.get('content', '')}")
+                                            st.write(f"· 新触发条件：{mod.get('trigger', '')}")
+                                            st.write(f"· 新λ值修正：{mod.get('lambda_effect', '')}")
+                                    if st.button("✅ 确认应用修改", key=f"confirm_mod_{i}"):
+                                        for mod in selected_modifications:
+                                            for law in laws_data["laws"]:
+                                                if str(law["id"]) == str(mod["id"]):
+                                                    law["name"] = mod["name"]
+                                                    law["content"] = mod["content"]
+                                                    law["trigger_condition"] = mod.get("trigger", mod.get("trigger_condition", ""))
+                                                    law["lambda_effect"] = mod.get("lambda_effect", "")
+                                                    save_law_to_supabase(law)
+                                                    break
+                                        laws_data = load_laws_from_supabase()
+                                        st.success(f"已应用 {len(selected_modifications)} 条修改！")
+                                        st.rerun()
+                                if not new_laws and not modified_laws:
+                                    st.info("本次校准未提炼出新定律或修改建议。")
+                                st.rerun()
+                            else:
+                                st.warning(report)
+                else:
+                    st.warning(cal_msg)
 
             st.markdown("### 📡 赛前数据")
             st.markdown(rec["search_report"])
