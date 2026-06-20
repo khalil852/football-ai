@@ -5,23 +5,36 @@ import os
 import sys
 import re
 import hashlib
+import random
+import string
 from datetime import datetime, timedelta
 from supabase import create_client, Client
 
 # ============ Supabase 配置 ============
-SUPABASE_URL = st.secrets["SUPABASE_URL"]
-SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+try:
+    SUPABASE_URL = st.secrets["SUPABASE_URL"]
+    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+except (KeyError, FileNotFoundError):
+    SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+    SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ============ 用户认证系统 ============
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
+def generate_token():
+    return ''.join(random.choices(string.ascii_letters + string.digits, k=32))
+
 def login_user(username, password):
     response = supabase.table("users").select("*").eq("username", username).execute()
     if response.data:
         user = response.data[0]
-        return user["password"] == hash_password(password)
+        if user["password"] == hash_password(password):
+            token = generate_token()
+            supabase.table("users").update({"token": token}).eq("username", username).execute()
+            st.session_state.login_token = token
+            return True
     return False
 
 def register_user(username, password):
@@ -33,18 +46,28 @@ def register_user(username, password):
         "password": hash_password(password),
         "role": "user"
     }).execute()
-    # 为新用户初始化个人定律库（从管理员复制）
     initialize_laws_for_user(username)
     return True
 
 def initialize_laws_for_user(username):
-    """为新用户复制一份管理员的默认定律库"""
     response = supabase.table("laws").select("*").eq("username", "admin").execute()
     if response.data:
         for law in response.data:
             law["username"] = username
             law["id"] = f"{username}_{law['id']}"
             supabase.table("laws").upsert(law, on_conflict="id").execute()
+
+def check_cookie_login():
+    token = st.session_state.get("login_token")
+    if not token:
+        return False
+    response = supabase.table("users").select("*").eq("token", token).execute()
+    if response.data:
+        user = response.data[0]
+        st.session_state.logged_in = True
+        st.session_state.username = user["username"]
+        return True
+    return False
 
 # ============ 页面配置 ============
 st.set_page_config(page_title="全维推演工厂", page_icon="⚽", layout="wide")
@@ -53,6 +76,11 @@ st.set_page_config(page_title="全维推演工厂", page_icon="⚽", layout="wid
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.username = ""
+if "login_token" not in st.session_state:
+    st.session_state.login_token = ""
+
+if not st.session_state.logged_in and st.session_state.login_token:
+    check_cookie_login()
 
 if not st.session_state.logged_in:
     st.title("⚽ 全维推演工厂 - 登录")
@@ -93,8 +121,10 @@ if not st.session_state.logged_in:
 st.sidebar.title(f"👤 {st.session_state.username}")
 
 if st.sidebar.button("🚪 登出", use_container_width=True):
+    supabase.table("users").update({"token": None}).eq("username", st.session_state.username).execute()
     st.session_state.logged_in = False
     st.session_state.username = ""
+    st.session_state.login_token = ""
     st.session_state.deepseek_key = ""
     st.session_state.tavily_key = ""
     st.rerun()
@@ -209,9 +239,7 @@ with open(resource_path("prompt_calibrate.md"), "r", encoding="utf-8") as f:
 
 # ============ 从 Supabase 加载定律库（多用户版本） ============
 def load_laws_from_supabase():
-    """从Supabase读取当前用户的定律（以及管理员的共享定律）"""
     try:
-        # 读取当前用户的定律 + 管理员发布的共享定律
         response = supabase.table("laws").select("*").or_(
             f"username.eq.{st.session_state.username},username.eq.admin"
         ).execute()
@@ -223,7 +251,6 @@ def load_laws_from_supabase():
         return {"laws": []}
 
 def save_law_to_supabase(law):
-    """保存或更新单条定律到Supabase（标记为当前用户）"""
     try:
         law["username"] = st.session_state.username
         supabase.table("laws").upsert(law, on_conflict="id").execute()
@@ -232,7 +259,6 @@ def save_law_to_supabase(law):
         st.error(f"保存定律失败：{e}")
         return False
 
-# 初始化时从Supabase加载定律库
 laws_data = load_laws_from_supabase()
 
 def call_deepseek(system_prompt, user_query, enable_search=False, search_mode="pre_match", summarize=True):
@@ -245,7 +271,7 @@ def call_deepseek(system_prompt, user_query, enable_search=False, search_mode="p
             url=URL,
             headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
             json={
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-v4-pro",
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_query}
@@ -317,7 +343,7 @@ def call_deepseek(system_prompt, user_query, enable_search=False, search_mode="p
         url=URL,
         headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
         json={
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-v4-pro",
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": new_user_message}
@@ -427,7 +453,6 @@ def calibrate_record(record):
     except Exception:
         pass
 
-    # 更新数据库记录
     supabase.table("history").update({
         "calibration": calibration_report,
         "pending_laws": json.dumps(new_laws) if new_laws else None,
@@ -502,14 +527,27 @@ with col1:
                 if result:
                     st.session_state.search_report = result
                     st.session_state.current_match = match
-                    time_match = re.search(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}', result)
-                    if time_match:
+                    # 精确提取开赛时间
+                    time_patterns = [
+                        r'(?:开赛时间|比赛时间|开始时间|Kick[-\s]?off)[：:\s]*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})',
+                        r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})'
+                    ]
+                    match_time_str = None
+                    for pattern in time_patterns:
+                        time_match = re.search(pattern, result, re.IGNORECASE)
+                        if time_match:
+                            match_time_str = time_match.group(1) if time_match.lastindex else time_match.group(0)
+                            break
+                    if match_time_str:
                         try:
-                            match_time = datetime.strptime(time_match.group(), "%Y-%m-%d %H:%M")
+                            match_time = datetime.strptime(match_time_str, "%Y-%m-%d %H:%M")
                             st.session_state.current_match_time = match_time
                             st.info(f"📅 已记录开赛时间：{match_time.strftime('%Y-%m-%d %H:%M')}")
                         except:
                             st.session_state.current_match_time = None
+                    else:
+                        st.session_state.current_match_time = None
+                        st.info("未找到开赛时间，跳过时间校验。")
         else:
             st.warning("请先输入比赛名称")
 
@@ -534,11 +572,9 @@ st.subheader("📊 赛后校准")
 if st.button("🔍 搜集赛后数据并校准", use_container_width=True):
     if st.session_state.analysis_report:
         match_time = st.session_state.get("current_match_time")
-        if match_time:
-            earliest_end = match_time + timedelta(minutes=120)
-            if datetime.now() < earliest_end:
-                st.warning(f"⏳ 比赛尚未结束。预计最早校准时间为 {earliest_end.strftime('%H:%M')}，请耐心等待。")
-                st.stop()
+        if match_time and datetime.now() < match_time + timedelta(minutes=120):
+            st.warning(f"⏳ 比赛尚未结束。预计最早校准时间为 {(match_time + timedelta(minutes=120)).strftime('%H:%M')}，请耐心等待。")
+            st.stop()
 
         with st.spinner("正在搜集赛后完整数据..."):
             response = supabase.table("history").select("*").eq("username", st.session_state.username).eq("match", st.session_state.current_match).order("timestamp", desc=True).limit(1).execute()
