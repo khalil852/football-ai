@@ -4,3 +4,4 @@ users.json
 laws.json
 prompt_analysis.md
 .streamlit/
+*.env
