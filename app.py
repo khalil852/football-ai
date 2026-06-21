@@ -138,19 +138,12 @@ st.sidebar.title(f"👤 {st.session_state.username}")
 if st.sidebar.button("🚪 登出", use_container_width=True):
     logout()
 
-# ============ 从 Supabase 读取 API Key ============
+# ============ 从 Supabase 读取 API Key（如有） ============
 def load_api_keys(username):
     response = supabase.table("api_keys").select("*").eq("username", username).execute()
     if response.data:
         return response.data[0]
     return {"deepseek_key": "", "tavily_key": ""}
-
-def save_api_keys(username, deepseek_key, tavily_key):
-    supabase.table("api_keys").upsert({
-        "username": username,
-        "deepseek_key": deepseek_key,
-        "tavily_key": tavily_key
-    }, on_conflict="username").execute()
 
 api_keys = load_api_keys(st.session_state.username)
 
@@ -170,38 +163,24 @@ if "current_record_id" not in st.session_state:
 if "current_match_time" not in st.session_state:
     st.session_state.current_match_time = None
 
-# ============ 侧边栏：API Key 设置 ============
-st.sidebar.title("⚙️ 设置")
+# ============ 从 Secrets 读取默认 Key ============
+# 优先使用用户自己的 Key，如果没有则使用 UP 主的默认 Key
+API_KEY = st.session_state.deepseek_key
+if not API_KEY:
+    try:
+        API_KEY = st.secrets["default_deepseek_key"]
+    except (KeyError, FileNotFoundError):
+        API_KEY = ""
 
-with st.sidebar.expander("🔑 API Key 管理", expanded=True):
-    deepseek_key = st.text_input(
-        "DeepSeek API Key",
-        type="password",
-        value=st.session_state.deepseek_key,
-        help="在 platform.deepseek.com 获取"
-    )
-    tavily_key = st.text_input(
-        "Tavily API Key（可选）",
-        type="password",
-        value=st.session_state.tavily_key,
-        help="可选。留空则使用系统默认的共享 Key。"
-    )
-    if st.button("💾 保存 Key", use_container_width=True):
-        if deepseek_key.strip():
-            st.session_state.deepseek_key = deepseek_key.strip()
-            st.session_state.tavily_key = tavily_key.strip()
-            save_api_keys(st.session_state.username, deepseek_key.strip(), tavily_key.strip())
-            st.success("API Key 已永久保存！")
-        else:
-            st.warning("请至少输入 DeepSeek API Key。")
+TAVILY_API_KEY = st.session_state.tavily_key
+if not TAVILY_API_KEY:
+    try:
+        TAVILY_API_KEY = st.secrets["default_tavily_key"]
+    except (KeyError, FileNotFoundError):
+        TAVILY_API_KEY = ""
 
-    if st.session_state.deepseek_key:
-        if st.session_state.tavily_key:
-            st.info("✅ 已使用你自己的 Tavily Key")
-        else:
-            st.info("✅ 已使用系统默认 Tavily Key")
-    else:
-        st.warning("⚠️ 请先配置 DeepSeek API Key")
+# ============ 侧边栏提示 ============
+st.sidebar.info("✅ 系统已自动配置 API Key，可直接使用。")
 
 # ============ 购买API Token入口（预留插槽） ============
 with st.sidebar.expander("💰 购买API Token", expanded=False):
@@ -212,18 +191,7 @@ with st.sidebar.expander("💰 购买API Token", expanded=False):
             st.markdown(f"[点击这里购买]({purchase_url})")
     else:
         st.info("📢 API Token 购买功能暂未开放。")
-        st.caption("请先使用你自己的 API Key。")
-
-# ============ 从 session_state 读取密钥 ============
-API_KEY = st.session_state.deepseek_key
-
-if st.session_state.tavily_key:
-    TAVILY_API_KEY = st.session_state.tavily_key
-else:
-    try:
-        TAVILY_API_KEY = st.secrets["default_tavily_key"]
-    except (KeyError, FileNotFoundError):
-        TAVILY_API_KEY = ""
+        st.caption("请先使用系统默认 Key。")
 
 # ============ API 配置 ============
 URL = "https://api.deepseek.com/v1/chat/completions"
@@ -318,7 +286,7 @@ def can_calibrate(match_time_str):
 
 def call_deepseek(system_prompt, user_query, enable_search=False, search_mode="pre_match", summarize=True):
     if not API_KEY:
-        st.error("请在侧边栏设置 API Key！")
+        st.error("API Key 未配置，请联系 UP 主。")
         return ""
 
     if not enable_search:
@@ -869,7 +837,6 @@ with st.expander("查看/管理所有定律", expanded=False):
             
             with col_delete:
                 if st.button("🗑️", key=f"delete_law_{law['id']}", help="删除此定律"):
-                    # 二次确认
                     warning_msg = f"确定要删除定律“{law['name']}”吗？"
                     if law.get("username") == "admin":
                         warning_msg += " 这是由管理员创建的原始定理，删除后可能影响系统推演质量。"
