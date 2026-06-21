@@ -145,6 +145,13 @@ def load_api_keys(username):
         return response.data[0]
     return {"deepseek_key": "", "tavily_key": ""}
 
+def save_api_keys(username, deepseek_key, tavily_key):
+    supabase.table("api_keys").upsert({
+        "username": username,
+        "deepseek_key": deepseek_key,
+        "tavily_key": tavily_key
+    }, on_conflict="username").execute()
+
 api_keys = load_api_keys(st.session_state.username)
 
 # ============ 初始化 session_state ============
@@ -163,8 +170,39 @@ if "current_record_id" not in st.session_state:
 if "current_match_time" not in st.session_state:
     st.session_state.current_match_time = None
 
+# ============ 侧边栏：API Key 设置 ============
+st.sidebar.title("⚙️ 设置")
+
+with st.sidebar.expander("🔑 API Key 管理（可选）", expanded=True):
+    st.info("💡 如果你有自己的 DeepSeek API Key，可以填在这里。留空则自动使用 UP 主的共享 Key。")
+    deepseek_key = st.text_input(
+        "你的 DeepSeek API Key",
+        type="password",
+        value=st.session_state.deepseek_key,
+        help="在 platform.deepseek.com 获取。留空则使用 UP 主的 Key。"
+    )
+    tavily_key = st.text_input(
+        "你的 Tavily API Key（可选）",
+        type="password",
+        value=st.session_state.tavily_key,
+        help="可选。留空则使用系统默认的共享 Key。"
+    )
+    if st.button("💾 保存我的 Key", use_container_width=True):
+        if deepseek_key.strip():
+            st.session_state.deepseek_key = deepseek_key.strip()
+            st.session_state.tavily_key = tavily_key.strip()
+            save_api_keys(st.session_state.username, deepseek_key.strip(), tavily_key.strip())
+            st.success("你的 API Key 已保存！")
+        else:
+            st.warning("如果你不想用自己的 Key，请直接留空，系统会使用 UP 主的共享 Key。")
+
+# 显示当前使用的 Key 状态
+if st.session_state.deepseek_key:
+    st.sidebar.success("✅ 正在使用你自己的 API Key")
+else:
+    st.sidebar.info("ℹ️ 正在使用 UP 主的共享 API Key")
+
 # ============ 从 Secrets 读取默认 Key ============
-# 优先使用用户自己的 Key，如果没有则使用 UP 主的默认 Key
 API_KEY = st.session_state.deepseek_key
 if not API_KEY:
     try:
@@ -179,9 +217,6 @@ if not TAVILY_API_KEY:
     except (KeyError, FileNotFoundError):
         TAVILY_API_KEY = ""
 
-# ============ 侧边栏提示 ============
-st.sidebar.info("✅ 系统已自动配置 API Key，可直接使用。")
-
 # ============ 购买API Token入口（预留插槽） ============
 with st.sidebar.expander("💰 购买API Token", expanded=False):
     purchase_url = os.getenv("PURCHASE_API_URL", "")
@@ -191,7 +226,6 @@ with st.sidebar.expander("💰 购买API Token", expanded=False):
             st.markdown(f"[点击这里购买]({purchase_url})")
     else:
         st.info("📢 API Token 购买功能暂未开放。")
-        st.caption("请先使用系统默认 Key。")
 
 # ============ API 配置 ============
 URL = "https://api.deepseek.com/v1/chat/completions"
