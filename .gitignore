@@ -1,7 +1,6 @@
+.streamlit/
 config.json
 config_*.json
 users.json
 laws.json
 prompt_analysis.md
-.streamlit/
-*.env

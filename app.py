@@ -10,16 +10,12 @@ import string
 from datetime import datetime, timedelta, timezone
 from supabase import create_client, Client
 
-# ============ Supabase 配置 ============
-try:
-    SUPABASE_URL = st.secrets["SUPABASE_URL"]
-    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-except (KeyError, FileNotFoundError):
-    SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-    SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+# ============ Supabase 配置（三层安全读取） ============
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", "YOUR_SUPABASE_URL_PLACEHOLDER")
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "YOUR_SUPABASE_KEY_PLACEHOLDER")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ============ 用户认证系统 ============
+# ============ 用户认证系统（URL参数持久化版本） ============
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
@@ -33,7 +29,9 @@ def login_user(username, password):
         if user["password"] == hash_password(password):
             token = generate_token()
             supabase.table("users").update({"token": token}).eq("username", username).execute()
+            st.query_params["auth_token"] = token
             st.session_state["auth_token"] = token
+            st.session_state["user_id"] = user["id"]
             return True
     return False
 
@@ -57,8 +55,10 @@ def initialize_laws_for_user(username):
             law["id"] = f"{username}_{law['id']}"
             supabase.table("laws").upsert(law, on_conflict="id").execute()
 
-def check_auth_token():
-    token = st.session_state.get("auth_token")
+def restore_login():
+    if st.session_state.get("logged_in"):
+        return True
+    token = st.query_params.get("auth_token")
     if not token:
         return False
     response = supabase.table("users").select("*").eq("token", token).execute()
@@ -66,25 +66,22 @@ def check_auth_token():
         user = response.data[0]
         st.session_state.logged_in = True
         st.session_state.username = user["username"]
+        st.session_state.auth_token = token
+        st.session_state.user_id = user["id"]
         return True
-    return False
+    else:
+        st.query_params.clear()
+        return False
 
-def perform_logout():
-    """执行完整的登出流程"""
-    # 1. 清除数据库中的token
-    if st.session_state.get("username"):
-        supabase.table("users").update({"token": None}).eq("username", st.session_state.username).execute()
-    
-    # 2. 清除所有session_state
-    keys_to_clear = [
-        "logged_in", "username", "auth_token", "deepseek_key", "tavily_key",
-        "search_report", "analysis_report", "current_match", "current_record_id", "current_match_time"
-    ]
-    for key in keys_to_clear:
-        if key in st.session_state:
-            del st.session_state[key]
-    
-    # 3. 强制刷新页面，清除所有残留状态
+def logout():
+    supabase.table("users").update({"token": None}).eq("username", st.session_state.username).execute()
+    st.session_state.logged_in = False
+    st.session_state.username = ""
+    st.session_state.auth_token = ""
+    st.session_state.user_id = None
+    st.session_state.deepseek_key = ""
+    st.session_state.tavily_key = ""
+    st.query_params.clear()
     st.rerun()
 
 # ============ 页面配置 ============
@@ -94,12 +91,11 @@ st.set_page_config(page_title="全维推演工厂", page_icon="⚽", layout="wid
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.username = ""
-if "auth_token" not in st.session_state:
     st.session_state.auth_token = ""
+    st.session_state.user_id = None
 
-# 尝试从Cookie恢复登录
-if not st.session_state.logged_in and st.session_state.auth_token:
-    check_auth_token()
+if not st.session_state.logged_in:
+    restore_login()
 
 if not st.session_state.logged_in:
     st.title("⚽ 全维推演工厂 - 登录")
@@ -140,7 +136,7 @@ if not st.session_state.logged_in:
 st.sidebar.title(f"👤 {st.session_state.username}")
 
 if st.sidebar.button("🚪 登出", use_container_width=True):
-    perform_logout()
+    logout()
 
 # ============ 从 Supabase 读取 API Key ============
 def load_api_keys(username):
@@ -268,6 +264,14 @@ def save_law_to_supabase(law):
         return True
     except Exception as e:
         st.error(f"保存定律失败：{e}")
+        return False
+
+def delete_law_from_supabase(law_id):
+    try:
+        supabase.table("laws").delete().eq("id", law_id).execute()
+        return True
+    except Exception as e:
+        st.error(f"删除定律失败：{e}")
         return False
 
 laws_data = load_laws_from_supabase()
@@ -432,33 +436,64 @@ def load_record_to_session(record):
     st.session_state.current_record_id = record["id"]
     st.session_state.current_match_time = record.get("match_time")
 
-def calibrate_record(record):
-    search_query = f"请联网搜索 {record['match']} 的赛后完整数据（比分、进球、技术统计、关键事件等）。"
-    post_match_data = call_deepseek(
-        system_prompt_calibrate, search_query,
-        enable_search=True, search_mode="post_match", summarize=False
-    )
+def calibrate_record(record, max_attempts=3):
+    for attempt in range(max_attempts):
+        search_query = f"请联网搜索 {record['match']} 的赛后完整数据（比分、进球、技术统计、关键事件等）。"
+        post_match_data = call_deepseek(
+            system_prompt_calibrate, search_query,
+            enable_search=True, search_mode="post_match", summarize=False
+        )
 
-    if any(kw in post_match_data for kw in [
-        "比赛尚未开始", "赛后数据未更新", "未返回有效结果", "搜索失败", "无法找到"
-    ]):
-        return False, post_match_data, [], []
+        if any(kw in post_match_data for kw in [
+            "比赛尚未开始", "赛后数据未更新", "未返回有效结果", "搜索失败", "无法找到"
+        ]):
+            if attempt == max_attempts - 1:
+                return False, post_match_data, [], []
+            continue
 
-    all_laws = laws_data["laws"]
-    laws_text = json.dumps(all_laws, ensure_ascii=False, indent=2)
+        verify_query = f"{record['match']} 最终比分 准确结果 技术统计"
+        verify_data = call_deepseek(
+            system_prompt_calibrate, verify_query,
+            enable_search=True, search_mode="post_match", summarize=False
+        )
+        score_pattern = re.findall(r'(\d+)\s*[-:]\s*(\d+)', verify_data + post_match_data)
 
-    summary_prompt = f"""你是一位专业的足球赛后分析师。请基于以下赛后真实数据、赛前推演报告和当前生效的定律库，进行全面的偏差分析，并提炼新的定律或对现有定律的修改建议。
+        all_laws = laws_data["laws"]
+        laws_text = json.dumps(all_laws, ensure_ascii=False, indent=2)
 
-## 当前生效的定律库
-{laws_text}
+        summary_prompt = f"""你是一位专业的足球赛后分析师。请基于以下赛后真实数据、赛前推演报告和当前生效的定律库，进行全面的偏差分析，并提炼新的定律或对现有定律的修改建议。
 
-## 赛后真实数据
+## ⚠️ 核心规则（最高优先级）
+1. 你必须严格基于提供的赛后真实数据进行分析，严禁编造任何信息。
+2. 如果某项数据在来源中不存在，必须在报告中标注"暂无"。
+3. 不得使用"可能"、"也许"、"大概"等不确定词汇。
+4. 所有比分、进球者、时间等数据必须与赛后真实数据完全一致。
+
+## 赛后真实数据（来自多个独立来源）
 {post_match_data}
+{verify_data}
 
 ## 赛前推演报告
 {record['analysis_report']}
 
-## 分析要求
+## 当前生效的定律库
+{laws_text}
+
+## 输出要求
+请先输出一个精确的JSON摘要（便于程序校验），然后再输出自然语言分析报告。
+
+JSON摘要格式：
+```json
+{{
+  "final_score": "主队进球-客队进球",
+  "half_time_score": "半场比分",
+  "goals": [{{"player": "球员名", "minute": 进球分钟, "type": "进球方式"}}],
+  "key_events": ["红黄牌", "伤病", "VAR介入等"],
+  "accuracy_score": 0-100的整数
+}}
+```
+
+## 偏差分析要求
 1. **准确率评分**：根据推演比分、胜负、进球者等与实际结果的匹配度，给出一个0-100的综合准确率评分。
 2. **偏差分析**：对比推演与现实的差距，指出哪些逻辑被验证、哪些被推翻，并分析根本原因。
 3. **提炼新定律/补丁**：至少提炼出一条新的定律或补丁。如果无需新增定律，请返回空列表。请严格按照以下JSON格式输出。
@@ -484,36 +519,55 @@ def calibrate_record(record):
   }}
 ]
 ```
-5. **输出格式**：请先用自然语言完成偏差分析和准确率评分，然后在报告末尾附上这两段JSON代码块（先新定律，后修改建议）。
+5. **输出格式**：先输出JSON摘要（务必包含准确率评分），然后输出自然语言分析，最后附上新定律和修改建议的JSON代码块。
 """
 
-    calibration_report = call_deepseek(
-        system_prompt_analysis,
-        summary_prompt,
-        enable_search=False
-    )
+        calibration_report = call_deepseek(
+            system_prompt_analysis,
+            summary_prompt,
+            enable_search=False
+        )
 
-    new_laws = []
-    modified_laws = []
-    try:
-        new_match = re.search(r'```json\s*(.*?)\s*```', calibration_report, re.DOTALL)
-        if new_match:
-            new_laws = json.loads(new_match.group(1))
-            calibration_report = calibration_report[:new_match.start()] + calibration_report[new_match.end():]
+        json_match = re.search(r'```json\s*(\{.*?\})\s*```', calibration_report, re.DOTALL)
+        if json_match:
+            try:
+                summary_json = json.loads(json_match.group(1))
+                report_score = summary_json.get("final_score", "")
+                verified = False
+                for s in score_pattern:
+                    if f"{s[0]}-{s[1]}" == report_score:
+                        verified = True
+                        break
+                if not verified and attempt < max_attempts - 1:
+                    st.warning(f"第 {attempt+1} 次校准的比分与搜索结果不一致，正在重试...")
+                    continue
+            except:
+                if attempt < max_attempts - 1:
+                    st.warning(f"第 {attempt+1} 次校准无法解析JSON，正在重试...")
+                    continue
 
-        mod_match = re.search(r'```json\s*(.*?)\s*```', calibration_report, re.DOTALL)
-        if mod_match:
-            modified_laws = json.loads(mod_match.group(1))
-    except Exception:
-        pass
+        new_laws = []
+        modified_laws = []
+        try:
+            all_json_blocks = list(re.finditer(r'```json\s*(.*?)\s*```', calibration_report, re.DOTALL))
+            for block in all_json_blocks:
+                block_text = block.group(1)
+                if 'name' in block_text and 'content' in block_text and 'id' not in block_text:
+                    new_laws = json.loads(block_text)
+                elif 'id' in block_text and 'name' in block_text:
+                    modified_laws = json.loads(block_text)
+        except Exception:
+            pass
 
-    supabase.table("history").update({
-        "calibration": calibration_report,
-        "pending_laws": json.dumps(new_laws) if new_laws else None,
-        "pending_modifications": json.dumps(modified_laws) if modified_laws else None
-    }).eq("id", record["id"]).execute()
+        supabase.table("history").update({
+            "calibration": calibration_report,
+            "pending_laws": json.dumps(new_laws) if new_laws else None,
+            "pending_modifications": json.dumps(modified_laws) if modified_laws else None
+        }).eq("id", record["id"]).execute()
 
-    return True, calibration_report, new_laws, modified_laws
+        return True, calibration_report, new_laws, modified_laws
+
+    return False, "多次尝试后仍无法生成准确的校准报告，请稍后手动重新校准。", [], []
 
 def calibrate_all_uncalibrated():
     history = load_history()
@@ -575,6 +629,78 @@ def calculate_accuracy():
 
     average = sum(scores) / len(scores)
     return round(average, 1), records_with_scores
+
+# ============ 加载待处理定理草案 ============
+def load_pending_drafts():
+    new_laws_drafts = []
+    modified_laws_drafts = []
+    history = load_history()
+    for rec in history:
+        if rec.get("calibration") and rec.get("pending_laws"):
+            try:
+                laws = json.loads(rec["pending_laws"])
+                for law in laws:
+                    law["source_match"] = rec["match"]
+                    law["source_id"] = rec["id"]
+                new_laws_drafts.extend(laws)
+            except:
+                pass
+        if rec.get("calibration") and rec.get("pending_modifications"):
+            try:
+                mods = json.loads(rec["pending_modifications"])
+                for mod in mods:
+                    mod["source_match"] = rec["match"]
+                    mod["source_id"] = rec["id"]
+                modified_laws_drafts.extend(mods)
+            except:
+                pass
+    return new_laws_drafts, modified_laws_drafts
+
+def apply_new_law(law, record_id):
+    clean_law = {
+        "id": law["id"],
+        "name": law["name"],
+        "content": law["content"],
+        "trigger_condition": law.get("trigger", ""),
+        "lambda_effect": law.get("lambda_effect", ""),
+        "status": law.get("status", "active"),
+        "username": st.session_state.username
+    }
+    supabase.table("laws").delete().eq("id", clean_law["id"]).execute()
+    supabase.table("laws").insert(clean_law).execute()
+    
+    response = supabase.table("history").select("pending_laws").eq("id", record_id).execute()
+    if response.data:
+        pending = json.loads(response.data[0]["pending_laws"]) if response.data[0]["pending_laws"] else []
+        updated_pending = [l for l in pending if l.get("name") != law.get("name")]
+        supabase.table("history").update({"pending_laws": json.dumps(updated_pending) if updated_pending else None}).eq("id", record_id).execute()
+
+def apply_modified_law(mod, record_id):
+    supabase.table("laws").update({
+        "name": mod["name"],
+        "content": mod["content"],
+        "trigger_condition": mod.get("trigger", ""),
+        "lambda_effect": mod.get("lambda_effect", "")
+    }).eq("id", mod["id"]).execute()
+    response = supabase.table("history").select("pending_modifications").eq("id", record_id).execute()
+    if response.data:
+        pending = json.loads(response.data[0]["pending_modifications"]) if response.data[0]["pending_modifications"] else []
+        updated_pending = [m for m in pending if m.get("id") != mod.get("id")]
+        supabase.table("history").update({"pending_modifications": json.dumps(updated_pending) if updated_pending else None}).eq("id", record_id).execute()
+
+def ignore_new_law(law, record_id):
+    response = supabase.table("history").select("pending_laws").eq("id", record_id).execute()
+    if response.data:
+        pending = json.loads(response.data[0]["pending_laws"]) if response.data[0]["pending_laws"] else []
+        updated_pending = [l for l in pending if l.get("name") != law.get("name")]
+        supabase.table("history").update({"pending_laws": json.dumps(updated_pending) if updated_pending else None}).eq("id", record_id).execute()
+
+def ignore_modified_law(mod, record_id):
+    response = supabase.table("history").select("pending_modifications").eq("id", record_id).execute()
+    if response.data:
+        pending = json.loads(response.data[0]["pending_modifications"]) if response.data[0]["pending_modifications"] else []
+        updated_pending = [m for m in pending if m.get("id") != mod.get("id")]
+        supabase.table("history").update({"pending_modifications": json.dumps(updated_pending) if updated_pending else None}).eq("id", record_id).execute()
 
 # ============ 主界面 ============
 st.title("⚽ 全维推演工厂 V2.6")
@@ -644,63 +770,10 @@ if st.button("🔍 搜集赛后数据并校准", use_container_width=True):
 
                 if success:
                     st.markdown(calibration_report)
-                    st.success("校准报告已保存至云端数据库。")
-
-                    if new_laws:
-                        st.markdown("### 📝 待确认的新定律/补丁")
-                        selected_new_laws = []
-                        for i, law in enumerate(new_laws):
-                            col_check, col_law = st.columns([1, 10])
-                            with col_check:
-                                if st.checkbox("", key=f"new_law_{i}", value=True):
-                                    selected_new_laws.append(law)
-                            with col_law:
-                                st.write(f"**{law.get('name', '新定律')}**")
-                                st.write(f"· {law.get('content', '')}")
-                                st.write(f"· 触发条件：{law.get('trigger', '')}")
-                                st.write(f"· λ值修正：{law.get('lambda_effect', '')}")
-
-                        if st.button("✅ 确认添加新定律"):
-                            for i, law in enumerate(selected_new_laws):
-                                law["id"] = f"new_{datetime.now().strftime('%Y%m%d%H%M%S')}_{i}"
-                                law["status"] = "active"
-                                save_law_to_supabase(law)
-                            laws_data = load_laws_from_supabase()
-                            st.success(f"已添加 {len(selected_new_laws)} 条新定律！")
-                            st.rerun()
-
-                    if modified_laws:
-                        st.markdown("### ✏️ 待确认的修改建议")
-                        selected_modifications = []
-                        for i, mod in enumerate(modified_laws):
-                            col_check, col_law = st.columns([1, 10])
-                            with col_check:
-                                if st.checkbox("", key=f"mod_law_{i}", value=True):
-                                    selected_modifications.append(mod)
-                            with col_law:
-                                st.write(f"**修改 ID: {mod.get('id', '未知')}**")
-                                st.write(f"· 新名称：{mod.get('name', '')}")
-                                st.write(f"· 新逻辑：{mod.get('content', '')}")
-                                st.write(f"· 新触发条件：{mod.get('trigger', '')}")
-                                st.write(f"· 新λ值修正：{mod.get('lambda_effect', '')}")
-
-                        if st.button("✅ 确认应用修改"):
-                            for mod in selected_modifications:
-                                for law in laws_data["laws"]:
-                                    if str(law["id"]) == str(mod["id"]):
-                                        law["name"] = mod["name"]
-                                        law["content"] = mod["content"]
-                                        law["trigger_condition"] = mod.get("trigger", mod.get("trigger_condition", ""))
-                                        law["lambda_effect"] = mod.get("lambda_effect", "")
-                                        save_law_to_supabase(law)
-                                        break
-                            laws_data = load_laws_from_supabase()
-                            st.success(f"已应用 {len(selected_modifications)} 条修改！")
-                            st.rerun()
-
-                    if not new_laws and not modified_laws:
+                    if new_laws or modified_laws:
+                        st.success(f"✅ 校准完成！已提炼出 {len(new_laws) if new_laws else 0} 条新定律草案和 {len(modified_laws) if modified_laws else 0} 条修改建议，请在下方定理控制台的【待处理的建议】中审核。")
+                    else:
                         st.info("本次校准未提炼出新定律或修改建议。")
-
                     st.session_state.search_report = record["search_report"]
                     st.session_state.analysis_report = record["analysis_report"]
                 else:
@@ -716,12 +789,64 @@ if st.button("🔍 搜集赛后数据并校准", use_container_width=True):
 st.markdown("---")
 st.subheader("⚙️ 定理卡牌控制台")
 
+new_drafts, modified_drafts = load_pending_drafts()
+
+if new_drafts or modified_drafts:
+    st.markdown("### 📝 待处理的建议")
+    st.info("以下是从校准中提炼出的定理草案，请逐一审核。")
+    
+    if new_drafts:
+        st.markdown("#### 新定律草案")
+        for i, law in enumerate(new_drafts):
+            with st.container():
+                st.markdown(f"**📌 {law.get('name', '新定律')}** (来自: {law.get('source_match', '未知')})")
+                st.markdown(f"· {law.get('content', '')}")
+                st.markdown(f"· 触发条件：{law.get('trigger', '')}")
+                st.markdown(f"· λ值修正：{law.get('lambda_effect', '')}")
+                col_apply, col_ignore = st.columns(2)
+                with col_apply:
+                    if st.button(f"✅ 应用", key=f"apply_new_{i}"):
+                        law["id"] = f"draft_{datetime.now().strftime('%Y%m%d%H%M%S')}_{i}"
+                        law["status"] = "active"
+                        apply_new_law(law, law["source_id"])
+                        st.success("已应用新定律！")
+                        st.rerun()
+                with col_ignore:
+                    if st.button(f"❌ 忽略", key=f"ignore_new_{i}"):
+                        ignore_new_law(law, law["source_id"])
+                        st.success("已忽略。")
+                        st.rerun()
+                st.divider()
+    
+    if modified_drafts:
+        st.markdown("#### 修改建议")
+        for i, mod in enumerate(modified_drafts):
+            with st.container():
+                st.markdown(f"**✏️ 修改 ID: {mod.get('id', '未知')}** (来自: {mod.get('source_match', '未知')})")
+                st.markdown(f"· 新名称：{mod.get('name', '')}")
+                st.markdown(f"· 新逻辑：{mod.get('content', '')}")
+                st.markdown(f"· 新触发条件：{mod.get('trigger', '')}")
+                st.markdown(f"· 新λ值修正：{mod.get('lambda_effect', '')}")
+                col_apply, col_ignore = st.columns(2)
+                with col_apply:
+                    if st.button(f"✅ 应用", key=f"apply_mod_{i}"):
+                        apply_modified_law(mod, mod["source_id"])
+                        st.success("已应用修改！")
+                        st.rerun()
+                with col_ignore:
+                    if st.button(f"❌ 忽略", key=f"ignore_mod_{i}"):
+                        ignore_modified_law(mod, mod["source_id"])
+                        st.success("已忽略。")
+                        st.rerun()
+                st.divider()
+
+# 现有定律
 with st.expander("查看/管理所有定律", expanded=False):
     st.info("💡 开关按钮用于控制该定律是否参与赛前推演。关闭后，模型将不会调用该定律。所有修改会自动保存到云端数据库。")
 
     if laws_data["laws"]:
         for i, law in enumerate(laws_data["laws"]):
-            col1, col2 = st.columns([1, 10])
+            col1, col2, col_delete = st.columns([1, 9, 1])
             with col1:
                 current_status = law.get("status", "active") == "active"
                 new_status = st.toggle(
@@ -741,6 +866,21 @@ with st.expander("查看/管理所有定律", expanded=False):
                 st.markdown(f"· {law['content']}")
                 st.markdown(f"· 触发条件：{law.get('trigger_condition', '暂无')}")
                 st.markdown(f"· λ值修正：{law.get('lambda_effect', '暂无')}")
+            
+            with col_delete:
+                if st.button("🗑️", key=f"delete_law_{law['id']}", help="删除此定律"):
+                    # 二次确认
+                    warning_msg = f"确定要删除定律“{law['name']}”吗？"
+                    if law.get("username") == "admin":
+                        warning_msg += " 这是由管理员创建的原始定理，删除后可能影响系统推演质量。"
+                    warning_msg += " 此操作不可恢复。"
+                    st.warning(warning_msg)
+                    if st.button("✅ 确认删除", key=f"confirm_delete_{law['id']}"):
+                        if delete_law_from_supabase(law["id"]):
+                            st.success("定律已删除。")
+                            st.rerun()
+                        else:
+                            st.error("删除失败，请重试。")
             st.divider()
     else:
         st.warning("定律库为空，请先添加定律。")
@@ -832,60 +972,10 @@ else:
                 if can_cal:
                     if st.button(f"🔍 校准此记录", key=f"calibrate_{i}"):
                         with st.spinner(f"正在校准 {rec['match']}..."):
-                            success, report, new_laws, modified_laws = calibrate_record(rec)
+                            success, report, _, _ = calibrate_record(rec)
                             if success:
-                                st.success(f"{rec['match']} 校准成功！")
+                                st.success(f"{rec['match']} 校准成功！定理草案已存入待处理队列，请在定理控制台查看。")
                                 st.markdown(report)
-                                if new_laws:
-                                    st.markdown("### 📝 待确认的新定律/补丁")
-                                    selected_new_laws = []
-                                    for j, law in enumerate(new_laws):
-                                        col_check, col_law = st.columns([1, 10])
-                                        with col_check:
-                                            if st.checkbox("", key=f"hist_new_law_{i}_{j}", value=True):
-                                                selected_new_laws.append(law)
-                                        with col_law:
-                                            st.write(f"**{law.get('name', '新定律')}**")
-                                            st.write(f"· {law.get('content', '')}")
-                                            st.write(f"· 触发条件：{law.get('trigger', '')}")
-                                            st.write(f"· λ值修正：{law.get('lambda_effect', '')}")
-                                    if st.button("✅ 确认添加新定律", key=f"confirm_new_{i}"):
-                                        for j, law in enumerate(selected_new_laws):
-                                            law["id"] = f"new_{datetime.now().strftime('%Y%m%d%H%M%S')}_{i}_{j}"
-                                            law["status"] = "active"
-                                            save_law_to_supabase(law)
-                                        laws_data = load_laws_from_supabase()
-                                        st.success(f"已添加 {len(selected_new_laws)} 条新定律！")
-                                        st.rerun()
-                                if modified_laws:
-                                    st.markdown("### ✏️ 待确认的修改建议")
-                                    selected_modifications = []
-                                    for j, mod in enumerate(modified_laws):
-                                        col_check, col_law = st.columns([1, 10])
-                                        with col_check:
-                                            if st.checkbox("", key=f"hist_mod_law_{i}_{j}", value=True):
-                                                selected_modifications.append(mod)
-                                        with col_law:
-                                            st.write(f"**修改 ID: {mod.get('id', '未知')}**")
-                                            st.write(f"· 新名称：{mod.get('name', '')}")
-                                            st.write(f"· 新逻辑：{mod.get('content', '')}")
-                                            st.write(f"· 新触发条件：{mod.get('trigger', '')}")
-                                            st.write(f"· 新λ值修正：{mod.get('lambda_effect', '')}")
-                                    if st.button("✅ 确认应用修改", key=f"confirm_mod_{i}"):
-                                        for mod in selected_modifications:
-                                            for law in laws_data["laws"]:
-                                                if str(law["id"]) == str(mod["id"]):
-                                                    law["name"] = mod["name"]
-                                                    law["content"] = mod["content"]
-                                                    law["trigger_condition"] = mod.get("trigger", mod.get("trigger_condition", ""))
-                                                    law["lambda_effect"] = mod.get("lambda_effect", "")
-                                                    save_law_to_supabase(law)
-                                                    break
-                                        laws_data = load_laws_from_supabase()
-                                        st.success(f"已应用 {len(selected_modifications)} 条修改！")
-                                        st.rerun()
-                                if not new_laws and not modified_laws:
-                                    st.info("本次校准未提炼出新定律或修改建议。")
                                 st.rerun()
                             else:
                                 st.warning(report)
