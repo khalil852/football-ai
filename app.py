@@ -290,33 +290,56 @@ def extract_match_time(report_text):
             return time_match.group(1) if time_match.lastindex else time_match.group(0)
     return None
 
+def parse_match_time(match_time_str):
+    """尝试多种格式解析时间，返回 datetime 对象或 None"""
+    if not match_time_str:
+        return None
+    formats = [
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y/%m/%d %H:%M",
+    ]
+    for fmt in formats:
+        try:
+            return datetime.strptime(match_time_str, fmt)
+        except:
+            continue
+    return None
+
 def get_match_status(match_time_str):
     if not match_time_str:
         return "未知", "⚪"
-    try:
-        match_time = datetime.strptime(match_time_str, "%Y-%m-%d %H:%M")
-        now = datetime.now()
-        if now < match_time:
-            return "未开赛", "🔵"
-        elif now < match_time + timedelta(minutes=120):
-            return "进行中", "🟡"
-        else:
-            return "已结束", "🟢"
-    except:
+    match_time = parse_match_time(match_time_str)
+    if not match_time:
         return "未知", "⚪"
+    now = datetime.now()
+    if now < match_time:
+        return "未开赛", "🔵"
+    elif now < match_time + timedelta(minutes=120):
+        return "进行中", "🟡"
+    else:
+        return "已结束", "🟢"
 
 def can_calibrate(match_time_str):
+    """判断是否可以校准。返回 (bool, str)"""
     if not match_time_str:
-        return True, "未找到开赛时间，将直接开始校准。"
-    try:
-        match_time = datetime.strptime(match_time_str, "%Y-%m-%d %H:%M")
-        if datetime.now() < match_time + timedelta(minutes=120):
-            earliest_end = match_time + timedelta(minutes=120)
-            return False, f"⏳ 比赛尚未结束，预计 {earliest_end.strftime('%Y-%m-%d %H:%M')} 后可校准。"
-        else:
-            return True, "比赛已结束，可以校准。"
-    except:
-        return True, "无法解析开赛时间，将直接开始校准。"
+        return False, "⚠️ 未找到开赛时间，无法自动判断。请确认比赛已结束后再手动校准。"
+    
+    match_time = parse_match_time(match_time_str)
+    if not match_time:
+        return False, f"⚠️ 无法解析开赛时间 ({match_time_str})，请确认比赛已结束后再手动校准。"
+    
+    now = datetime.now()
+    earliest_end = match_time + timedelta(minutes=120)
+    
+    if now < match_time:
+        return False, f"⏳ 比赛尚未开始 ({match_time.strftime('%Y-%m-%d %H:%M')})，请等待开赛后再校准。"
+    elif now < earliest_end:
+        return False, f"⏳ 比赛仍在进行中 (预计最早 {earliest_end.strftime('%Y-%m-%d %H:%M')} 结束)，请耐心等待。"
+    else:
+        return True, f"✅ 比赛已结束，可以校准。"
 
 def call_deepseek(system_prompt, user_query, enable_search=False, search_mode="pre_match", summarize=True):
     if not API_KEY:
@@ -525,10 +548,10 @@ JSON摘要格式：
 """
 
         calibration_report = call_deepseek(
-            system_prompt_analysis,
-            summary_prompt,
-            enable_search=False
-        )
+    system_prompt_calibrate,  # 改成使用校准AI自己的指令
+    summary_prompt,
+    enable_search=False
+)
 
         json_match = re.search(r'```json\s*(\{.*?\})\s*```', calibration_report, re.DOTALL)
         if json_match:
@@ -573,8 +596,8 @@ JSON摘要格式：
 
 def calibrate_all_uncalibrated():
     history = load_history()
-    skipped_count = 0
     calibrated_count = 0
+    skipped_count = 0
     progress_bar = st.progress(0)
     status_text = st.empty()
     
@@ -585,13 +608,12 @@ def calibrate_all_uncalibrated():
         return 0, 0
 
     for i, rec in enumerate(uncalibrated):
-        status_text.text(f"正在检查：{rec['match']} ({i+1}/{len(uncalibrated)})")
+        status_text.text(f"正在校准：{rec['match']} ({i+1}/{len(uncalibrated)})")
         can_cal, msg = can_calibrate(rec.get("match_time"))
         if not can_cal:
             st.warning(f"⏭️ {rec['match']}：{msg}")
             skipped_count += 1
         else:
-            status_text.text(f"正在校准：{rec['match']} ({i+1}/{len(uncalibrated)})")
             success, report, _, _ = calibrate_record(rec)
             if success:
                 calibrated_count += 1
@@ -724,7 +746,7 @@ with col1:
                     if extracted_time:
                         st.success(f"✅ 开赛时间：{extracted_time}")
                     else:
-                        st.info("ℹ️ 未提取到开赛时间，赛后校准将不会拦截。")
+                        st.info("ℹ️ 未提取到开赛时间，赛后校准将需要手动确认。")
         else:
             st.warning("请先输入比赛名称")
 
@@ -759,11 +781,12 @@ if st.button("🔍 搜集赛后数据并校准", use_container_width=True):
     if st.session_state.analysis_report:
         match_time = st.session_state.get("current_match_time")
         can_cal, msg = can_calibrate(match_time)
+        
         if not can_cal:
             st.warning(msg)
             st.stop()
+        
         st.success(msg)
-
         with st.spinner("正在搜集赛后完整数据，请耐心等待..."):
             response = supabase.table("history").select("*").eq("username", st.session_state.username).eq("match", st.session_state.current_match).order("timestamp", desc=True).limit(1).execute()
             if response.data:
@@ -927,7 +950,7 @@ if st.button("🔧 一键校准所有未校准记录", use_container_width=True)
     with st.spinner("正在批量校准..."):
         cali_count, skip_count = calibrate_all_uncalibrated()
         if cali_count == 0 and skip_count == 0:
-            st.info("所有记录都已被校准或尚未到可校准时间。")
+            st.info("所有记录都已被校准。")
         else:
             msg = f"成功校准 {cali_count} 条记录。"
             if skip_count > 0:
