@@ -1132,23 +1132,37 @@ def call_deepseek(system_prompt, user_query, enable_search=False, search_mode="p
     if not enable_search:
         return _deepseek_chat(system_prompt, user_query, model=model)
 
-    # Tier 1: ESPN API
-    football_data = _try_espn_api(user_query, search_mode)
-    if football_data:
+    # Tier 1: ESPN API (硬数据: 比分/统计/赔率/积分榜/球场)
+    espn_data = _try_espn_api(user_query, search_mode)
+
+    # Tier 2: Tavily (软数据: 阵容/教练发言/伤情/裁判)
+    # ESPN 命中时补缺，未命中时独扛
+    if espn_data:
+        tavily_data = _search_with_tavily(system_prompt, user_query, search_mode, model=model)
+        if tavily_data:
+            # 合并：ESPN 硬数据为主，Tavily 补充软信息
+            return _deepseek_chat(
+                system_prompt,
+                f"{user_query}\n\n"
+                f"**【硬性约束】ESPN API 已确认以下事实，不得覆盖：**\n{espn_data}\n\n"
+                f"**【参考】Tavily 搜索结果（用于补充阵容/教练/伤情/裁判）：**\n{tavily_data}\n\n"
+                f"**综合以上两份数据生成报告。ESPN 有数据的字段以 ESPN 为准。ESPN 没有的字段从 Tavily 获取。都不要编造。**",
+                model=model
+            )
         return _deepseek_chat(
             system_prompt,
             f"{user_query}\n\n"
-            f"**【硬性约束】ESPN API 已确认以下事实，不得覆盖：**\n{football_data}\n\n"
-            f"**ESPN 未提供的字段（阵容/教练/裁判）仅从搜索结果获取，不要从训练数据推测。**",
+            f"**【硬性约束】ESPN API 已确认以下事实，不得覆盖：**\n{espn_data}\n\n"
+            f"**ESPN 未提供的字段（阵容/教练/裁判）如果搜索不到，标注「暂无」，不要从训练数据推测。**",
             model=model
         )
 
-    # Tier 2: Tavily
+    # ESPN 未命中 — Tavily 独扛
     result = _search_with_tavily(system_prompt, user_query, search_mode, model=model)
     if result:
         return result
 
-    # Tier 3: 纯模型知识
+    # Tier 3: 纯模型知识（最后手段）
     return _deepseek_chat(
         system_prompt,
         "[数据源均不可用] 请利用你的训练数据回答以下问题。不确定处标注\"基于历史数据推测\"。\n\n" + user_query,
