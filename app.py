@@ -1332,7 +1332,18 @@ def ignore_modified_law(mod, record_id):
 
 # ============ 主界面 ============
 st.title("⚽ 全维推演工厂 V2.6")
-match = st.text_input("输入比赛对阵（例如：法国 vs 塞内加尔）", placeholder="输入比赛名称...")
+
+# 从中英文映射表中提取中文队名，去重排序
+_CN_TEAMS = [""] + sorted({k for k in _ESPN_TEAMS if re.search(r'[一-鿿]', k)})
+c1, c2, c3 = st.columns([2, 1, 2])
+with c1:
+    team1 = st.selectbox("选择球队", _CN_TEAMS, format_func=lambda x: "请选择..." if x == "" else x, key="team1")
+with c2:
+    st.markdown("<h2 style='text-align:center;margin-top:0.5em'>vs</h2>", unsafe_allow_html=True)
+with c3:
+    team2 = st.selectbox("选择球队", _CN_TEAMS, format_func=lambda x: "请选择..." if x == "" else x, key="team2")
+
+match = f"{team1} vs {team2}" if team1 and team2 else ""
 
 # 训练模式：用于已结束的历史比赛，跳过时间锁，可直接校准
 training_mode = st.checkbox(
