@@ -350,7 +350,7 @@ def _deepseek_chat(system_prompt, user_content):
         url=URL,
         headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
         json={
-            "model": "deepseek-v4-pro",
+            "model": "deepseek-chat",
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content}
@@ -646,64 +646,44 @@ def _tavily_search(query):
         return f"搜索失败：{str(e)}"
 
 
-def _search_with_tavily(system_prompt, user_query):
-    """通过 web_search tool + Tavily 让 DeepSeek 自主搜索并生成报告"""
+def _search_with_tavily(system_prompt, user_query, search_mode="pre_match"):
+    """直接 Tavily 搜索 + DeepSeek 汇总，不依赖 tool-calling"""
     if not TAVILY_API_KEY:
         return ""
 
-    tools = [{
-        "type": "function",
-        "function": {
-            "name": "web_search",
-            "description": "实时互联网搜索，获取最新新闻、数据、资讯",
-            "parameters": {
-                "type": "object",
-                "required": ["query"],
-                "properties": {
-                    "query": {"type": "string", "description": "搜索关键词"}
-                }
-            }
-        }
-    }]
+    if search_mode == "pre_match":
+        search_rounds = [
+            f"{user_query} 首发阵容 伤病 历史交锋",
+            f"{user_query} 赔率 裁判 赛前新闻 教练发言",
+            f"{user_query} 出线形势 战术分析 关键球员",
+        ]
+    else:
+        search_rounds = [
+            f"{user_query} 最终比分 进球者 进球时间",
+            f"{user_query} 赛后技术统计 射门 控球率 角球",
+            f"{user_query} 赛后报告 比赛回顾 关键事件 红黄牌",
+        ]
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_query}
-    ]
+    all_results = ""
+    for q in search_rounds:
+        r = _tavily_search(q)
+        if r and "搜索失败" not in r:
+            all_results += r + "\n"
 
-    for _ in range(2):
-        response = requests.post(
-            url=URL,
-            headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": "deepseek-v4-pro",
-                "messages": messages,
-                "tools": tools,
-                "tool_choice": "auto"
-            },
-            timeout=60
-        )
-        data = response.json()
-        if "error" in data:
-            st.error(f"API 错误：{data['error']}")
-            return ""
+    if not all_results:
+        return ""
 
-        msg = data["choices"][0]["message"]
-        if not msg.get("tool_calls"):
-            return msg.get("content", "")
+    return _deepseek_chat(
+        system_prompt,
+        f"""以下是多轮搜索结果，请综合分析并严格按照模板格式输出报告。
 
-        messages.append(msg)
-        for call in msg["tool_calls"]:
-            if call["function"]["name"] == "web_search":
-                q = json.loads(call["function"]["arguments"])["query"]
-                results = _tavily_search(q)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": call["id"],
-                    "content": results
-                })
+{user_query}
 
-    return _deepseek_chat(system_prompt, "请基于以上搜索结果，生成完整报告。")
+搜索结果：
+{all_results}
+
+注意：所有结果必须基于以上搜索数据。不确定的信息标注"暂无"。"""
+    )
 
 
 # ============ 统一搜索入口 ============
@@ -728,7 +708,7 @@ def call_deepseek(system_prompt, user_query, enable_search=False, search_mode="p
         )
 
     # Tier 2: Tavily
-    result = _search_with_tavily(system_prompt, user_query)
+    result = _search_with_tavily(system_prompt, user_query, search_mode)
     if result:
         return result
 
