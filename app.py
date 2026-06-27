@@ -388,13 +388,21 @@ def can_calibrate(match_time_str):
     else:
         return True, f"✅ 比赛已结束，可以校准。"
 
-def _deepseek_chat(system_prompt, user_content):
+# ============ 模型分配策略 ============
+# v4-flash: 低成本低延迟，用于数据整理/格式化任务
+# v4-pro:   深度推理，用于战术推演/分析任务
+MODEL_SEARCH = "deepseek-v4-flash"       # 搜索报告生成
+MODEL_ANALYSIS = "deepseek-v4-pro"       # 战术推演
+MODEL_CALIBRATE = "deepseek-v4-flash"    # 校准数据搜集 & 报告生成
+
+
+def _deepseek_chat(system_prompt, user_content, model=None):
     """调用 DeepSeek API，返回响应文本或空字符串"""
     response = requests.post(
         url=URL,
         headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
         json={
-            "model": "deepseek-v4-pro",
+            "model": model or MODEL_SEARCH,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content}
@@ -693,7 +701,7 @@ def _tavily_search(query):
         return f"搜索失败：{str(e)}"
 
 
-def _search_with_tavily(system_prompt, user_query, search_mode="pre_match"):
+def _search_with_tavily(system_prompt, user_query, search_mode="pre_match", model=None):
     """直接 Tavily 搜索 + DeepSeek 汇总，不依赖 tool-calling"""
     if not TAVILY_API_KEY:
         return ""
@@ -749,39 +757,43 @@ def _search_with_tavily(system_prompt, user_query, search_mode="pre_match"):
 {override}
 
 注意：所有结果必须基于以上搜索数据。不确定的信息标注"暂无"。"""
-    )
+    ,
+        model=model)
 
 
 # ============ 统一搜索入口 ============
-def call_deepseek(system_prompt, user_query, enable_search=False, search_mode="pre_match"):
+def call_deepseek(system_prompt, user_query, enable_search=False, search_mode="pre_match", model=None):
     """调用 DeepSeek API。
     enable_search=True 时：API-Football → Tavily 二级回退。
     search_mode: "pre_match" 或 "post_match"
+    model: 覆盖默认模型选择
     """
     if not API_KEY:
         st.error("API Key 未配置，请联系 UP 主。")
         return ""
 
     if not enable_search:
-        return _deepseek_chat(system_prompt, user_query)
+        return _deepseek_chat(system_prompt, user_query, model=model)
 
     # Tier 1: API-Football
     football_data = _try_football_api(user_query, search_mode)
     if football_data:
         return _deepseek_chat(
             system_prompt,
-            f"{user_query}\n\n[实时数据]\n{football_data}"
+            f"{user_query}\n\n[实时数据]\n{football_data}",
+            model=model
         )
 
     # Tier 2: Tavily
-    result = _search_with_tavily(system_prompt, user_query, search_mode)
+    result = _search_with_tavily(system_prompt, user_query, search_mode, model=model)
     if result:
         return result
 
     # Tier 3: 纯模型知识
     return _deepseek_chat(
         system_prompt,
-        "[数据源均不可用] 请利用你的训练数据回答以下问题。不确定处标注\"基于历史数据推测\"。\n\n" + user_query
+        "[数据源均不可用] 请利用你的训练数据回答以下问题。不确定处标注\"基于历史数据推测\"。\n\n" + user_query,
+        model=model
     )
 
 # ============ 历史记录管理 ============
@@ -822,7 +834,7 @@ def calibrate_record(record, max_attempts=3):
         search_query = f"请联网搜索 {record['match']} 的赛后完整数据（比分、进球、技术统计、关键事件等）。"
         post_match_data = call_deepseek(
             system_prompt_calibrate, search_query,
-            enable_search=True, search_mode="post_match"
+            enable_search=True, search_mode="post_match", model=MODEL_CALIBRATE
         )
 
         if any(kw in post_match_data for kw in [
@@ -839,7 +851,8 @@ def calibrate_record(record, max_attempts=3):
                     "3. 关键事件（红黄牌、伤病、VAR等）\n"
                     "4. 赛后技术统计（射门、控球率、角球等）\n\n"
                     "如果某项数据不记得，标注「暂无」。"
-                    "严禁输出「比赛尚未开始」——这场比赛已确认结束。"
+                    "严禁输出「比赛尚未开始」——这场比赛已确认结束。",
+                    model=MODEL_CALIBRATE,
                 )
                 if any(kw in post_match_data for kw in ["比赛尚未开始", "赛后数据未更新"]):
                     return False, post_match_data, [], []
@@ -850,7 +863,7 @@ def calibrate_record(record, max_attempts=3):
         verify_query = f"{record['match']} 最终比分 准确结果 技术统计"
         verify_data = call_deepseek(
             system_prompt_calibrate, verify_query,
-            enable_search=True, search_mode="post_match"
+            enable_search=True, search_mode="post_match", model=MODEL_CALIBRATE
         )
         score_pattern = re.findall(r'(\d+)\s*[-:]\s*(\d+)', verify_data + post_match_data)
 
@@ -921,7 +934,7 @@ JSON摘要格式：
         calibration_report = call_deepseek(
     system_prompt_calibrate,  # 改成使用校准AI自己的指令
     summary_prompt,
-    enable_search=False
+    enable_search=False, model=MODEL_CALIBRATE
 )
 
         json_match = re.search(r'```json\s*(\{.*?\})\s*```', calibration_report, re.DOTALL)
@@ -1134,7 +1147,7 @@ with col1:
                     search_query = f"请为 {match} 搜集比赛的完整信息（包括最终比分、进球者、关键事件、首发阵容等），并严格按照模板格式输出。请注意这是一场已经结束的比赛。"
                 else:
                     search_query = f"请为 {match} 搜集赛前关键信息，并严格按照模板格式输出。"
-                result = call_deepseek(system_prompt_search, search_query, enable_search=True, search_mode="pre_match")
+                result = call_deepseek(system_prompt_search, search_query, enable_search=True, search_mode="pre_match", model=MODEL_SEARCH)
                 if result:
                     st.session_state.search_report = result
                     st.session_state.current_match = match
@@ -1160,7 +1173,7 @@ with col2:
                     analysis_query = f"请基于以下比赛数据（注意：这是已结束的历史比赛，数据中可能包含最终比分），对 {match} 进行推演。请忽略最终比分，模拟赛前视角进行分析。\n\n{st.session_state.search_report}"
                 else:
                     analysis_query = f"请基于以下赛前数据，对 {match} 进行推演。\n\n{st.session_state.search_report}"
-                result = call_deepseek(system_prompt_analysis, analysis_query, enable_search=False)
+                result = call_deepseek(system_prompt_analysis, analysis_query, enable_search=False, model=MODEL_ANALYSIS)
                 if result:
                     st.session_state.analysis_report = result
                     save_record(match, st.session_state.search_report, st.session_state.analysis_report)
