@@ -453,11 +453,31 @@ class LambdaModifiers:
     coach_intent: float = 1.0
     scenario:     float = 1.0
     home_adv:     float = 1.08
+    confidence:   float = 1.0   # 模型置信度调节（0.7-1.0），用于 "不可预测" 类定律
+    _extra:       dict = field(default_factory=dict)  # 用户自定义定律的任意维度
+
+    @classmethod
+    def from_merged(cls, merged_modifiers: dict, home_adv: bool = True):
+        """从 AI 输出的 merged_modifiers 动态构造。兼容任意用户定律。"""
+        known = {"attack", "defense", "tactical", "coach_intent", "scenario", "confidence"}
+        kwargs = {"home_adv": 1.08 if home_adv else 1.0}
+        extra = {}
+        for k, v in merged_modifiers.items():
+            if k in known:
+                kwargs[k] = v
+            elif k == "home_adv":
+                kwargs["home_adv"] = v
+            else:
+                # 用户自定义维度——放入 _extra，apply 时乘进去
+                extra[k] = v
+        return cls(**kwargs, _extra=extra)
 
     def apply(self, lam: float, is_home: bool = False) -> float:
         f = self.attack * self.defense * self.tactical * self.coach_intent * self.scenario
         if is_home:
             f *= self.home_adv
+        for v in self._extra.values():
+            f *= v
         return max(0.05, lam * f)
 
 
@@ -563,50 +583,47 @@ def calibrate_math(pred: MatchPrediction, actual_h: int, actual_a: int) -> Calib
 
 
 # ---- 定律库驱动的参数提取 ----
-_LAW_WEIGHT_PROMPT = """你是一个足球量化分析师。你的任务是将"全维推演定律库"应用到一场具体比赛中，输出精确的数值修正因子。
+_LAW_WEIGHT_PROMPT = """你是一个足球量化分析师。你的任务是逐条检查"全维推演定律库"中的每一条定律是否被本场比赛触发，并对触发的定律给出精确的乘性修正权重。
 
 ## 工作流程
 1. 阅读赛前数据报告，理解比赛背景
-2. 逐条阅读定律库中的定律
-3. 判断该定律的 trigger（触发条件）是否被本场比赛满足
-4. 如果满足，根据具体情境计算精确的乘性修正权重（不使用区间，取精确值）
-5. 合并所有触发的定律，输出最终的修正因子
+2. 逐条阅读定律库中的定律，判断其 trigger 是否被满足
+3. 对每条触发的定律，输出精确的乘性修正因子和影响的变量名
 
-## 权重取值指南
-- 1.00 = 无影响
-- 0.70-0.85 = 严重削弱（金球级核心缺阵、战术完克）
-- 0.86-0.95 = 轻微削弱（轮换球员缺阵、小伤病）
-- 1.05-1.15 = 轻微增强（核心复出、主场气势）
-- 1.16-1.30 = 显著增强（超级球星回归、对手防线崩溃）
-
-### 关键原则
-- 同一维度多条定律触发时，因子相乘（不是相加）
-- 根据具体情境取精确值。比如"进攻λ -0.3 至 -0.5"：
-  - 如果缺阵的是金球前三+队史射手王+无替代者 → attack = 0.75
-  - 如果缺阵的是普通轮换前锋+有合格替补 → attack = 0.92
-- λ_effect 中的加法修正需转为乘性：factor = (λ + delta) / λ
-  例：λ=1.5, delta=-0.4 → factor = 1.1/1.5 = 0.73
+## 关键规则
+- 逐条处理，不要跳过任何定律。不触发的定律也要出现在输出中（applies=false）
+- 如果定律的 lambda_effect 有数值区间（如 "进攻λ -0.3 至 -0.5"），根据情境取精确值
+- 如果定律的 lambda_effect 只有定性描述（如 "需用数学模型修正"、"置信度大幅降低"），你需要自己推断出合理的数值
+- 如果定律影响多个维度（如 "领先后退守" 同时影响 attack 和 defense），在 modifiers 中列出所有影响的维度
+- 你可以自由定义 modifier 的 key 名（attack, defense, coach_intent, confidence, tempo, psychology 等）。key 名用英文 snake_case
+- 无影响的维度不需要出现在 modifiers 中
+- 加法修正转乘性：factor = (λ + delta) / λ。例：λ=1.5, delta=-0.4 → factor = 1.1/1.5 ≈ 0.73
+- 权重区间参考：0.70-0.85 严重削弱 | 0.86-0.95 轻微削弱 | 1.0 无影响 | 1.05-1.15 轻微增强 | 1.16-1.30 显著增强
 
 ## 输出
-仅输出一个 JSON 对象，不要任何解释文字:
+仅输出一个 JSON 对象，不要任何解释:
 {
-  "triggered_laws": ["触发的定律名称1", "触发的定律名称2"],
   "home_team": "主队名",
   "away_team": "客队名",
   "lam_h_initial": 1.5,
   "lam_a_initial": 1.3,
-  "attack": 0.85,
-  "defense": 1.0,
-  "tactical": 1.05,
-  "coach_intent": 1.15,
-  "scenario": 1.0,
   "phi": 0.15,
   "lam_c": 0.05,
   "home_adv": true,
   "odds_h": 1.65,
   "odds_d": 3.80,
   "odds_a": 5.50,
-  "reasoning": "一句话总结哪些定律被触发以及最关键的一条定律"
+  "law_effects": [
+    {
+      "law_id": "定律的id或name",
+      "law_name": "定律名称",
+      "applies": true,
+      "modifiers": {"attack": 0.85},
+      "reason": "为什么触发/为什么不触发,一句话"
+    }
+  ],
+  "merged_modifiers": {"attack": 0.85, "coach_intent": 1.08, "confidence": 0.9},
+  "summary": "一句话总结本场最关键的一条定律及其影响"
 }
 """
 
@@ -617,10 +634,9 @@ def _laws_to_modifiers(search_report: str, laws: list) -> dict:
     if not search_report:
         return {}
 
-    # 只保留 active 定律，转 JSON
     active_laws = [l for l in laws if l.get("status", "active") == "active"]
     if not active_laws:
-        active_laws = laws  # 兜底：所有定律都视为 active
+        active_laws = laws
 
     laws_json = json.dumps(active_laws, ensure_ascii=False, indent=2)
 
@@ -648,10 +664,10 @@ def _laws_to_modifiers(search_report: str, laws: list) -> dict:
         if m:
             result = json.loads(m.group())
             # 展示触发的定律
-            triggered = result.pop("triggered_laws", [])
-            reasoning = result.pop("reasoning", "")
+            law_effects = result.get("law_effects", [])
+            triggered = [f'{e["law_name"]}' for e in law_effects if e.get("applies")]
             if triggered:
-                st.info(f"📋 触发的定律: {', '.join(triggered[:5])}")
+                st.info(f"📋 触发 {len(triggered)}/{len(active_laws)} 条定律: {', '.join(triggered[:5])}")
             return result
     except Exception:
         pass
@@ -1457,15 +1473,23 @@ with col2:
                 # 1. 从搜索结果提取结构化参数
                 params = _extract_params(st.session_state.search_report,
                                          laws_data.get("laws", []))
-                # 2. 构建修正因子
-                mod = LambdaModifiers(
-                    attack=params.get("attack", 1.0),
-                    defense=params.get("defense", 1.0),
-                    tactical=params.get("tactical", 1.0),
-                    coach_intent=params.get("coach_intent", 1.0),
-                    scenario=params.get("scenario", 1.0),
-                    home_adv=1.08 if params.get("home_adv", False) else 1.0,
-                )
+                # 2. 从定律分析结果构建修正因子（兼容任意用户定律）
+                merged = params.get("merged_modifiers", {})
+                if merged:
+                    mod = LambdaModifiers.from_merged(
+                        merged,
+                        home_adv=params.get("home_adv", False)
+                    )
+                else:
+                    # 回退：旧格式（无 merged_modifiers）
+                    mod = LambdaModifiers(
+                        attack=params.get("attack", 1.0),
+                        defense=params.get("defense", 1.0),
+                        tactical=params.get("tactical", 1.0),
+                        coach_intent=params.get("coach_intent", 1.0),
+                        scenario=params.get("scenario", 1.0),
+                        home_adv=1.08 if params.get("home_adv", False) else 1.0,
+                    )
                 # 3. 数学引擎推演
                 odds = None
                 if params.get("odds_h") and params.get("odds_d") and params.get("odds_a"):
@@ -1481,10 +1505,24 @@ with col2:
                     phi=params.get("phi", 0.15),
                 )
                 st.session_state.math_prediction = pred
-                st.info(f"数学引擎完成 (λ_h={pred.lam_h:.2f}, λ_a={pred.lam_a:.2f})")
+                # 定律对置信度的修正
+                pred.confidence *= mod.confidence
+                st.info(f"数学引擎完成 (λ_h={pred.lam_h:.2f}, λ_a={pred.lam_a:.2f}, "
+                        f"置信度 {pred.confidence*100:.0f}%)")
 
             with st.spinner("正在生成推演报告..."):
                 # 4. LLM 基于数学结果生成自然语言报告
+                modifier_info = {
+                    k: v for k, v in {
+                        "attack": mod.attack, "defense": mod.defense,
+                        "tactical": mod.tactical, "coach_intent": mod.coach_intent,
+                        "scenario": mod.scenario, "home_adv": mod.home_adv,
+                        "confidence": mod.confidence,
+                    }.items() if v != 1.0
+                }
+                for k, v in mod._extra.items():
+                    modifier_info[k] = v
+
                 math_json = json.dumps({
                     "主队": pred.home_team, "客队": pred.away_team,
                     "主队λ": round(pred.lam_h, 2), "客队λ": round(pred.lam_a, 2),
@@ -1493,12 +1531,8 @@ with col2:
                     "平局": f"{pred.draw*100:.1f}%",
                     "客胜": f"{pred.away_win*100:.1f}%",
                     "最可能比分": [f"{h}-{a} ({p*100:.1f}%)" for (h, a), p in pred.top_scores[:5]],
-                    "置信度": f"{pred.confidence*100:.0f}%",
-                    "修正因子": {
-                        "进攻": mod.attack, "防守": mod.defense,
-                        "战术": mod.tactical, "教练意图": mod.coach_intent,
-                        "场景": mod.scenario, "主场优势": mod.home_adv,
-                    }
+                    "模型置信度": f"{pred.confidence*100:.0f}%",
+                    "定律修正因子": modifier_info,
                 }, ensure_ascii=False, indent=2)
 
                 analysis_query = (
