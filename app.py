@@ -22,7 +22,7 @@ from supabase import create_client, Client
 #   SUPABASE_KEY           = "sb_secret_xxx"          # service_role key
 #   default_deepseek_key   = "sk-xxx"                 # UP 主的共享 DeepSeek Key
 #   default_tavily_key     = "tvly-xxx"               # UP 主的共享 Tavily Key（可选）
-#   football_api_key       = "xxx"                    # API-Football Key（可选，rapidapi 免费）
+#   (ESPN API 免费无需 Key，世界杯数据全自动获取)
 #   analysis_prompt        = '''多行文本'''            # 推演 AI 的 system prompt
 # =============================================================================
 
@@ -39,10 +39,6 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 DEFAULT_DEEPSEEK_KEY = _secret("default_deepseek_key")
 TAVILY_API_KEY = _secret("default_tavily_key")
-FOOTBALL_API_KEY = _secret("football_api_key")
-
-FOOTBALL_URL = "https://v3.football.api-sports.io"
-FOOTBALL_HEADERS = {"x-apisports-key": FOOTBALL_API_KEY}
 TAVILY_URL = "https://api.tavily.com/search"
 
 # ============ System Prompts（优先 secrets，回退本地文件）============
@@ -744,258 +740,177 @@ _CALIBRATE_FROM_JSON_PROMPT = (
 )
 
 
-# ============ API-Football 数据获取 ============
+# ============ ESPN API 数据获取（免费，无需 Key）============
+# ============ ESPN API 数据获取（免费，无需 Key，无需注册）============
+# 全赛程：2026-06-11 开幕 至 2026-07-19 决赛
+_ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=20260611-20260720"
+
+# 2026 世界杯 48 队中英文名 → ESPN ID 映射（完整列表，免 Key）
+_ESPN_TEAMS = {
+    "墨西哥": "203", "美国": "660", "加拿大": "206",
+    "法国": "478", "德国": "481", "巴西": "205", "阿根廷": "202",
+    "英格兰": "448", "西班牙": "164", "葡萄牙": "482", "荷兰": "449",
+    "比利时": "459", "克罗地亚": "477", "乌拉圭": "212",
+    "塞内加尔": "654", "摩洛哥": "2869", "日本": "627", "韩国": "451",
+    "澳大利亚": "628", "伊朗": "469", "卡塔尔": "4398", "沙特": "655",
+    "加纳": "4469", "突尼斯": "659", "埃及": "2620", "阿尔及利亚": "624",
+    "哥伦比亚": "208", "厄瓜多尔": "209", "巴拉圭": "210",
+    "瑞典": "466", "挪威": "464", "瑞士": "475",
+    "奥地利": "474", "土耳其": "465", "捷克": "450", "苏格兰": "580",
+    "科特迪瓦": "4789", "南非": "467", "海地": "2654", "巴拿马": "2659",
+    "刚果": "2850", "佛得角": "2597", "乌兹别克": "2570",
+    "约旦": "2917", "伊拉克": "4375", "新西兰": "2666", "库拉索": "11678",
+    "波黑": "452",
+    # 英文别名
+    "Mexico": "203", "USA": "660", "Canada": "206",
+    "France": "478", "Germany": "481", "Brazil": "205", "Argentina": "202",
+    "England": "448", "Spain": "164", "Portugal": "482", "Netherlands": "449",
+    "Belgium": "459", "Croatia": "477", "Uruguay": "212",
+    "Senegal": "654", "Morocco": "2869", "Japan": "627", "South Korea": "451",
+    "Australia": "628", "Iran": "469", "Qatar": "4398", "Saudi Arabia": "655",
+    "Ghana": "4469", "Tunisia": "659", "Egypt": "2620", "Algeria": "624",
+    "Colombia": "208", "Ecuador": "209", "Paraguay": "210",
+    "Sweden": "466", "Norway": "464", "Switzerland": "475",
+    "Austria": "474", "Turkey": "465", "Czechia": "450", "Scotland": "580",
+    "Ivory Coast": "4789", "South Africa": "467", "Haiti": "2654", "Panama": "2659",
+    "DR Congo": "2850", "Cape Verde": "2597", "Uzbekistan": "2570",
+    "Jordan": "2917", "Iraq": "4375", "New Zealand": "2666", "Curacao": "11678",
+    "Bosnia": "452",
+}
+
+
 def _parse_teams(query):
     """从查询中提取两个队名，返回 (team1, team2) 或 (None, None)"""
     for sep in [r'\s+vs\s+', r'\s+v\s+', r'\s+对阵\s+', r'\s+对\s+']:
         parts = re.split(sep, query, flags=re.IGNORECASE)
         if len(parts) == 2:
-            # 取分隔符左边最后一个词（中文或英文词）
-            left_words = [w for w in parts[0].split() if re.search(r'[一-鿿]|[a-zA-Z]', w)]
-            righ_words = [w for w in parts[1].split() if re.search(r'[一-鿿]|[a-zA-Z]', w)]
-            if left_words and righ_words:
-                t1, t2 = left_words[-1], righ_words[0]
+            left = [w for w in parts[0].split() if re.search(r'[一-鿿]|[a-zA-Z]', w)]
+            righ = [w for w in parts[1].split() if re.search(r'[一-鿿]|[a-zA-Z]', w)]
+            if left and righ:
+                t1, t2 = left[-1], righ[0]
                 if t1 != t2:
                     return t1, t2
     return None, None
 
 
-# 中英文队名映射（API-Football 只能英文搜索）
-_TEAM_NAME_MAP = {
-    "法国": "France", "德国": "Germany", "巴西": "Brazil", "阿根廷": "Argentina",
-    "英格兰": "England", "西班牙": "Spain", "葡萄牙": "Portugal", "荷兰": "Netherlands",
-    "意大利": "Italy", "比利时": "Belgium", "克罗地亚": "Croatia", "乌拉圭": "Uruguay",
-    "塞内加尔": "Senegal", "摩洛哥": "Morocco", "日本": "Japan", "韩国": "South Korea",
-    "澳大利亚": "Australia", "伊朗": "Iran", "沙特": "Saudi Arabia", "卡塔尔": "Qatar",
-    "墨西哥": "Mexico", "美国": "USA", "加拿大": "Canada", "哥斯达黎加": "Costa Rica",
-    "加纳": "Ghana", "喀麦隆": "Cameroon", "尼日利亚": "Nigeria", "突尼斯": "Tunisia",
-    "埃及": "Egypt", "哥伦比亚": "Colombia", "智利": "Chile", "秘鲁": "Peru",
-    "巴拉圭": "Paraguay", "厄瓜多尔": "Ecuador", "丹麦": "Denmark", "瑞典": "Sweden",
-    "挪威": "Norway", "波兰": "Poland", "瑞士": "Switzerland", "奥地利": "Austria",
-    "塞尔维亚": "Serbia", "乌克兰": "Ukraine", "土耳其": "Turkey", "捷克": "Czech",
-    "俄罗斯": "Russia", "威尔士": "Wales", "苏格兰": "Scotland", "希腊": "Greece",
-    "科特迪瓦": "Ivory Coast", "海地": "Haiti", "巴拿马": "Panama", "牙买加": "Jamaica",
-}
-
-
-def _search_team(team_name):
-    """搜索球队 ID，返回 (team_id, team_name) 或 (None, None)。
-    先中→英映射，再尝试 API 搜索。"""
-    if not FOOTBALL_API_KEY:
-        return None, None
-    # 中→英
-    search_name = _TEAM_NAME_MAP.get(team_name, team_name)
-    try:
-        resp = requests.get(
-            f"{FOOTBALL_URL}/teams",
-            params={"search": search_name},
-            headers=FOOTBALL_HEADERS,
-            timeout=10
-        )
-        data = resp.json()
-        for t in data.get("response", []):
-            return t["team"]["id"], t["team"]["name"]
-        # 第一次搜不到，尝试 country 字段
-        resp2 = requests.get(
-            f"{FOOTBALL_URL}/teams",
-            params={"country": search_name},
-            headers=FOOTBALL_HEADERS,
-            timeout=10
-        )
-        for t in resp2.json().get("response", []):
-            return t["team"]["id"], t["team"]["name"]
-    except Exception:
-        pass
-    return None, None
-
-
-def _try_football_api(match_query, search_mode):
-    """从 API-Football 获取结构化数据，成功返回格式化文本，失败返回空字符串"""
-    if not FOOTBALL_API_KEY:
-        return ""
-
+def _try_espn_api(match_query, search_mode):
+    """从 ESPN API 免费获取世界杯数据。成功返回格式化文本，失败返回空字符串。"""
     t1_name, t2_name = _parse_teams(match_query)
     if not t1_name or not t2_name:
         return ""
 
-    t1_id, t1_full = _search_team(t1_name)
-    t2_id, t2_full = _search_team(t2_name)
+    t1_id = _ESPN_TEAMS.get(t1_name)
+    t2_id = _ESPN_TEAMS.get(t2_name)
     if not t1_id or not t2_id:
         return ""
 
     try:
-        # 跨赛季搜索（免费版无 2026 数据，回退到 2024-2022）
+        resp = requests.get(_ESPN_SCOREBOARD, timeout=10)
+        data = resp.json()
+
         fixture = None
-        for season in [2026, 2025, 2024, 2022]:
-            resp = requests.get(
-                f"{FOOTBALL_URL}/fixtures",
-                params={"team": t1_id, "season": season},
-                headers=FOOTBALL_HEADERS,
-                timeout=10
-            )
-            data = resp.json()
-            for f in data.get("response", []):
-                h_id = f["teams"]["home"]["id"]
-                a_id = f["teams"]["away"]["id"]
-                if (h_id == t1_id and a_id == t2_id) or (h_id == t2_id and a_id == t1_id):
-                    fixture = f
-                    break
-            if fixture:
+        for ev in data.get("events", []):
+            comp = ev["competitions"][0]
+            c1 = str(comp["competitors"][0]["id"])
+            c2 = str(comp["competitors"][1]["id"])
+            if (c1 == t1_id and c2 == t2_id) or (c1 == t2_id and c2 == t1_id):
+                fixture = ev
                 break
 
         if not fixture:
             return ""
 
-        fx = fixture["fixture"]
-        teams = fixture["teams"]
-        league = fixture["league"]
-        lines = []
+        c = fixture["competitions"][0]
+        h = c["competitors"][0]
+        a = c["competitors"][1]
+        venue = fixture.get("venue", {})
+        status = fixture["status"]["type"]
 
-        # 基本信息
-        lines.append(f"赛事: {league.get('name', '未知')} | {league.get('round', '')}")
-        lines.append(f"对阵: {teams['home']['name']} vs {teams['away']['name']}")
-        kickoff = fx.get("date", "")
-        if kickoff:
-            lines.append(f"开赛时间: {kickoff.replace('T', ' ').replace('+00:00', '')}")
-        venue = fixture.get("fixture", {}).get("venue", {})
-        if venue.get("name"):
-            lines.append(f"场地: {venue.get('name', '')}, {venue.get('city', '')}")
+        lines = []
+        lines.append(f"赛事: FIFA World Cup 2026 | {fixture.get('season', {}).get('slug', '')}")
+        lines.append(f"对阵: {h['team']['displayName']} vs {a['team']['displayName']}")
+        lines.append(f"日期: {fixture['date'][:10]} | 场地: {venue.get('displayName', '?')}, {venue.get('address', {}).get('city', '?')}")
+        lines.append(f"状态: {status['description']} ({status.get('shortDetail', '')})")
+
+        # 比分
+        if h.get("score") is not None and a.get("score") is not None:
+            lines.append(f"比分: {h['team']['displayName']} {h['score']} - {a['score']} {a['team']['displayName']}")
 
         # 赔率
-        odds_resp = requests.get(
-            f"{FOOTBALL_URL}/odds",
-            params={"fixture": fx["id"]},
-            headers=FOOTBALL_HEADERS,
-            timeout=10
-        )
-        odds_data = odds_resp.json()
-        for book in odds_data.get("response", [])[:2]:
-            for b in book.get("bookmakers", [])[:2]:
-                lines.append(f"赔率 ({b['name']}):")
-                for bet in b.get("bets", [])[:3]:
-                    vals = " / ".join(
-                        f"{v['value']}({v['odd']})" for v in bet.get("values", [])[:3]
-                    )
-                    lines.append(f"  {bet['name']}: {vals}")
+        odds = c.get("odds", [{}])[0]
+        if odds and odds.get("provider"):
+            lines.append(f"赔率 ({odds['provider'].get('name', '?')}): {odds.get('details', '?')}")
+            draw = odds.get("drawOdds", {}) or {}
+            if draw.get("moneyLine"):
+                lines.append(f"  平局赔率: {draw['moneyLine']}")
 
-        # 阵容
-        lineup_resp = requests.get(
-            f"{FOOTBALL_URL}/fixtures/lineups",
-            params={"fixture": fx["id"]},
-            headers=FOOTBALL_HEADERS,
-            timeout=10
-        )
-        for lu in lineup_resp.json().get("response", []):
-            side = lu.get("team", {}).get("name", "")
-            formation = lu.get("formation", "")
-            lines.append(f"\n{side} 阵型 {formation}:")
-            for p in lu.get("startXI", [])[:11]:
-                name = p.get("player", {}).get("name", "")
-                number = p.get("player", {}).get("number", "")
-                pos = p.get("player", {}).get("pos", "")
-                lines.append(f"  {number} {name} ({pos})")
-            subs = [p.get("player", {}).get("name", "") for p in lu.get("substitutes", [])[:7]]
-            if subs:
-                lines.append(f"  替补: {', '.join(subs)}")
+        # 积分榜战绩
+        for side, competitor in [("H", h), ("A", a)]:
+            records = competitor.get("records", [])
+            if records:
+                r = records[0]
+                lines.append(f"  战绩 {competitor['team']['displayName']}: {r.get('summary', '?')} (W-D-L)")
 
-        # 伤病
-        for tid, tname in [(t1_id, t1_full), (t2_id, t2_full)]:
-            inj_resp = requests.get(
-                f"{FOOTBALL_URL}/injuries",
-                params={"team": tid, "season": 2026},
-                headers=FOOTBALL_HEADERS,
-                timeout=10
-            )
-            injuries = inj_resp.json().get("response", [])
-            if injuries:
-                lines.append(f"\n{tname or tid} 伤病:")
-                for inj in injuries[:8]:
-                    p = inj.get("player", {})
-                    lines.append(
-                        f"  {p.get('name', '')} — {inj.get('fixture', {}).get('reason', '未知')}"
-                    )
-
-        # 历史交锋
-        h2h_resp = requests.get(
-            f"{FOOTBALL_URL}/fixtures/headtohead",
-            params={"h2h": f"{t1_id}-{t2_id}"},
-            headers=FOOTBALL_HEADERS,
-            timeout=10
-        )
-        h2h_list = h2h_resp.json().get("response", [])[:5]
-        if h2h_list:
-            lines.append("\n历史交锋:")
-            for h in h2h_list:
-                ht = h["teams"]["home"]["name"]
-                at = h["teams"]["away"]["name"]
-                hg = h["goals"]["home"]
-                ag = h["goals"]["away"]
-                d = h["fixture"]["date"][:10]
-                lines.append(f"  {d} {ht} {hg}-{ag} {at}")
-
-        # 积分榜
-        standings_resp = requests.get(
-            f"{FOOTBALL_URL}/standings",
-            params={"league": league.get("id"), "season": 2026},
-            headers=FOOTBALL_HEADERS,
-            timeout=10
-        )
-        for grp in standings_resp.json().get("response", [{}])[0].get("league", {}).get("standings", []):
-            for row in grp:
-                if row.get("team", {}).get("id") in (t1_id, t2_id):
-                    lines.append(
-                        f"  积分榜 {row['team']['name']}: "
-                        f"排名{row.get('rank','?')} | "
-                        f"赛{row.get('all',{}).get('played','?')} "
-                        f"胜{row.get('all',{}).get('win','?')} "
-                        f"平{row.get('all',{}).get('draw','?')} "
-                        f"负{row.get('all',{}).get('lose','?')} | "
-                        f"进球{row.get('all',{}).get('goals',{}).get('for','?')} "
-                        f"失球{row.get('all',{}).get('goals',{}).get('against','?')} "
-                    )
-
-        # 赛后数据
-        if search_mode == "post_match":
-            events_resp = requests.get(
-                f"{FOOTBALL_URL}/fixtures/events",
-                params={"fixture": fx["id"]},
-                headers=FOOTBALL_HEADERS,
-                timeout=10
-            )
-            events = events_resp.json().get("response", [])
-            if events:
+        # 赛后统计和事件
+        if search_mode == "post_match" or status.get("state") == "post":
+            # 比赛事件
+            details = c.get("details", [])
+            if details:
                 lines.append(f"\n比赛事件:")
-                for ev in events:
-                    t = ev.get("time", {}).get("elapsed", "?")
-                    p = ev.get("player", {}).get("name", "")
-                    tp = ev.get("type", "")
-                    detail = ev.get("detail", "")
-                    side = ev.get("team", {}).get("name", "")
-                    extra = ev.get("comments", "") or ""
-                    match tp:
-                        case "Goal":
-                            lines.append(f"  {t}' ⚽ {p} ({side}) — {detail} {extra}")
-                        case "Card":
-                            lines.append(f"  {t}' 🟨 {p} ({side}) — {detail}")
-                        case "subst":
-                            a = ev.get("assist", {}).get("name", "")
-                            lines.append(f"  {t}' 🔄 {a} → {p} ({side})")
+                for d in details:
+                    clock = d.get("clock", {}).get("displayValue", "?")
+                    typ = d.get("type", {}).get("text", "?")
+                    side_tag = "H" if str(d.get("team", {}).get("id", "")) == str(h["id"]) else "A"
+                    players = d.get("athletesInvolved", [])
+                    pname = players[0].get("displayName", "") if players else ""
+                    score_val = f" [{d['scoreValue']}]" if d.get("scoreValue") else ""
+                    match d.get("type", {}).get("id", ""):
+                        case "70" | "137":  # Goal
+                            lines.append(f"  {clock} ⚽ {pname} ({side_tag}){score_val}")
+                        case "94":  # Yellow
+                            lines.append(f"  {clock} 🟨 {pname} ({side_tag})")
+                        case "93":  # Red
+                            lines.append(f"  {clock} 🟥 {pname} ({side_tag})")
 
-            stats_resp = requests.get(
-                f"{FOOTBALL_URL}/fixtures/statistics",
-                params={"fixture": fx["id"]},
-                headers=FOOTBALL_HEADERS,
-                timeout=10
-            )
-            for team_stats in stats_resp.json().get("response", []):
-                tname = team_stats.get("team", {}).get("name", "")
-                lines.append(f"\n{tname} 技术统计:")
-                for s in team_stats.get("statistics", []):
-                    v = s.get("value", "")
-                    if v is not None:
-                        lines.append(f"  {s.get('type','')}: {v}")
+            # 技术统计
+            h_stats = {s["name"]: s["displayValue"] for s in h.get("statistics", [])}
+            a_stats = {s["name"]: s["displayValue"] for s in a.get("statistics", [])}
+            if h_stats:
+                lines.append(f"\n技术统计:")
+                stat_names = ["possessionPct", "totalShots", "shotsOnTarget", "wonCorners",
+                              "foulsCommitted", "goalAssists"]
+                stat_labels = {"possessionPct": "控球率 %", "totalShots": "总射门", "shotsOnTarget": "射正",
+                               "wonCorners": "角球", "foulsCommitted": "犯规", "goalAssists": "助攻"}
+                for sname in stat_names:
+                    hv = h_stats.get(sname, "?")
+                    av = a_stats.get(sname, "?")
+                    label = stat_labels.get(sname, sname)
+                    lines.append(f"  {label}: {hv} vs {av}")
 
-        lines.insert(0, "[数据来源: API-Football]")
+        # 分组积分榜
+        resp_table = requests.get(
+            "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/standings",
+            timeout=10
+        )
+        groups = resp_table.json().get("children", [])
+        for grp in groups:
+            for row in grp.get("standings", {}).get("entries", []):
+                tid = str(row.get("team", {}).get("id", ""))
+                if tid in (t1_id, t2_id):
+                    stats = row.get("stats", [])
+                    if len(stats) >= 6:
+                        lines.append(f"  积分榜 {row['team']['displayName']}: "
+                                     f"排名{stats[8].get('value','?') if len(stats)>8 else '?'} | "
+                                     f"赛{stats[0].get('value','?')} "
+                                     f"胜{stats[1].get('value','?')} "
+                                     f"平{stats[2].get('value','?')} "
+                                     f"负{stats[3].get('value','?')} | "
+                                     f"进球{stats[4].get('value','?')} "
+                                     f"失球{stats[5].get('value','?')} "
+                                     f"净胜{stats[6].get('value','?')} "
+                                     f"积分{stats[7].get('value','?')}")
+
+        lines.insert(0, "[数据来源: ESPN API (免费)]")
         return "\n".join(lines)
 
     except Exception:
@@ -1091,7 +1006,7 @@ def _search_with_tavily(system_prompt, user_query, search_mode="pre_match", mode
 # ============ 统一搜索入口 ============
 def call_deepseek(system_prompt, user_query, enable_search=False, search_mode="pre_match", model=None):
     """调用 DeepSeek API。
-    enable_search=True 时：API-Football → Tavily 二级回退。
+    enable_search=True 时：ESPN API → Tavily 二级回退。
     search_mode: "pre_match" 或 "post_match"
     model: 覆盖默认模型选择
     """
@@ -1102,8 +1017,8 @@ def call_deepseek(system_prompt, user_query, enable_search=False, search_mode="p
     if not enable_search:
         return _deepseek_chat(system_prompt, user_query, model=model)
 
-    # Tier 1: API-Football
-    football_data = _try_football_api(user_query, search_mode)
+    # Tier 1: ESPN API
+    football_data = _try_espn_api(user_query, search_mode)
     if football_data:
         return _deepseek_chat(
             system_prompt,
