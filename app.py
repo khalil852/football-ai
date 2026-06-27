@@ -73,7 +73,6 @@ def login_user(username, password):
         if user["password"] == hash_password(password):
             token = generate_token()
             supabase.table("users").update({"token": token}).eq("username", username).execute()
-            st.query_params["auth_token"] = token
             st.session_state["auth_token"] = token
             st.session_state["user_id"] = user["id"]
             return True
@@ -177,6 +176,21 @@ if not st.session_state.logged_in:
 
 # ============ 已登录状态 ============
 st.sidebar.title(f"👤 {st.session_state.username}")
+
+# 每次渲染都确保 auth_token 写入浏览器地址栏（URL），
+# 这样 F5 刷新后 st.query_params 能读回 token 恢复登录。
+token = st.session_state.get("auth_token", "")
+if token:
+    st.query_params["auth_token"] = token
+    st.components.v1.html(f"""
+    <script>
+    var u = new URL(window.location);
+    if (u.searchParams.get('auth_token') !== '{token}') {{
+        u.searchParams.set('auth_token', '{token}');
+        window.history.replaceState({{}}, '', u);
+    }}
+    </script>
+    """, height=0)
 
 if st.sidebar.button("🚪 登出", use_container_width=True):
     logout()
