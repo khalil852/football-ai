@@ -530,6 +530,7 @@ class LambdaModifiers:
         for k, v in merged_modifiers.items():
             try:
                 v = float(v)
+                v = max(0.5, min(2.0, v))  # 拒绝荒谬值
             except (TypeError, ValueError):
                 continue
             if k in known:
@@ -667,6 +668,8 @@ def calibrate_math(pred: MatchPrediction, actual_h: int, actual_a: int) -> Calib
 _LAW_WEIGHT_MAP_PROMPT = (
     "你是一个足球量化分析师。逐条检查定律的 trigger 是否匹配本场比赛。\n"
     "如果匹配，直接使用定律自带的 modifier_map 值，不要修改。\n"
+    "从赛前报告中提取两队近期的场均进球数作为 λ 初始值。\n"
+    "λ 必须在 0.8-3.5 范围内（世界杯球队场均进 0.5-3.5 球）。\n"
     "输出 JSON: {\"merged_modifiers\": {\"attack\": 0.85, ...}, "
     "\"lam_h_initial\": 1.5, \"lam_a_initial\": 1.3, "
     "\"phi\": 0.15, \"lam_c\": 0.02, \"home_adv\": true, "
@@ -681,6 +684,7 @@ _LAW_WEIGHT_PROMPT_FALLBACK = (
     "对匹配的定律，根据 lambda_effect 推断乘性修正因子。\n"
     "加法转乘性：factor = (λ + delta) / λ，假设 λ≈1.5。\n"
     "权重参考：0.70-0.85 严重削弱 | 0.86-0.95 轻微削弱 | 1.0 无影响 | 1.05-1.15 轻微增强。\n"
+    "λ 初始值必须在 0.8-3.5（世界杯场均 0.5-3.5 球）。\n"
     "输出 JSON: {\"merged_modifiers\": {\"attack\": 0.85, ...}, "
     "\"lam_h_initial\": 1.5, \"lam_a_initial\": 1.3, "
     "\"phi\": 0.15, \"lam_c\": 0.02, \"home_adv\": true, "
@@ -822,8 +826,37 @@ _CALIBRATE_FROM_JSON_PROMPT = (
 )
 
 
+# ---- 48 队默认 λ 进球率（场均进球，基于 FIFA 排名 + 近期大赛数据） ----
+# AI 提取失败时回退到此表。乘性修正因子在此基准上叠加。
+_DEFAULT_LAM = {
+    "阿根廷": 2.0, "法国": 2.1, "巴西": 2.0, "英格兰": 1.8, "德国": 1.9,
+    "西班牙": 1.8, "葡萄牙": 2.0, "荷兰": 1.7, "比利时": 1.6, "克罗地亚": 1.4,
+    "乌拉圭": 1.4, "墨西哥": 1.3, "美国": 1.3, "加拿大": 1.2,
+    "塞内加尔": 1.2, "摩洛哥": 1.1, "日本": 1.4, "韩国": 1.3,
+    "澳大利亚": 1.0, "伊朗": 0.9, "卡塔尔": 0.9, "沙特": 0.8,
+    "加纳": 1.0, "突尼斯": 0.8, "埃及": 1.0, "阿尔及利亚": 1.1,
+    "哥伦比亚": 1.2, "厄瓜多尔": 1.1, "巴拉圭": 0.9,
+    "瑞典": 1.1, "挪威": 1.3, "瑞士": 1.2,
+    "奥地利": 1.3, "土耳其": 1.1, "捷克": 1.1, "苏格兰": 1.0,
+    "科特迪瓦": 1.1, "南非": 0.8, "海地": 0.5, "巴拿马": 0.6,
+    "刚果": 0.8, "佛得角": 0.7, "乌兹别克": 0.7,
+    "约旦": 0.6, "伊拉克": 0.7, "新西兰": 0.7, "库拉索": 0.5, "波黑": 0.8,
+    "Argentina": 2.0, "France": 2.1, "Brazil": 2.0, "England": 1.8, "Germany": 1.9,
+    "Spain": 1.8, "Portugal": 2.0, "Netherlands": 1.7, "Belgium": 1.6, "Croatia": 1.4,
+    "Uruguay": 1.4, "Mexico": 1.3, "USA": 1.3, "Canada": 1.2,
+    "Senegal": 1.2, "Morocco": 1.1, "Japan": 1.4, "South Korea": 1.3,
+    "Australia": 1.0, "Iran": 0.9, "Qatar": 0.9, "Saudi Arabia": 0.8,
+    "Ghana": 1.0, "Tunisia": 0.8, "Egypt": 1.0, "Algeria": 1.1,
+    "Colombia": 1.2, "Ecuador": 1.1, "Paraguay": 0.9,
+    "Sweden": 1.1, "Norway": 1.3, "Switzerland": 1.2,
+    "Austria": 1.3, "Turkey": 1.1, "Czechia": 1.1, "Scotland": 1.0,
+    "Ivory Coast": 1.1, "South Africa": 0.8, "Haiti": 0.5, "Panama": 0.6,
+    "DR Congo": 0.8, "Cape Verde": 0.7, "Uzbekistan": 0.7,
+    "Jordan": 0.6, "Iraq": 0.7, "New Zealand": 0.7, "Curacao": 0.5, "Bosnia": 0.8,
+}
+
+
 # ============ ESPN API 数据获取（免费，无需 Key）============
-# ============ ESPN API 数据获取（免费，无需 Key，无需注册）============
 # 全赛程：2026-06-11 开幕 至 2026-07-19 决赛
 _ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=20260611-20260720"
 
@@ -1487,8 +1520,10 @@ with col2:
                                          laws_data.get("laws", []))
                 # 2. 从定律分析结果构建修正因子（兼容任意用户定律）
                 def _f(key, default=1.0):
-                    try: return float(params.get(key, default))
-                    except: return default
+                    try: v = float(params.get(key, default))
+                    except: v = default
+                    # 拒绝荒谬值：修正因子应在 0.5-2.0 范围内
+                    return max(0.5, min(2.0, v)) if key not in ("lam_h_initial", "lam_a_initial", "odds_h", "odds_d", "odds_a") else v
 
                 merged = params.get("merged_modifiers", {})
                 if merged:
@@ -1514,12 +1549,19 @@ with col2:
                         odds = (oh, od, oa)
                 except Exception:
                     pass
+                # λ 初始值：优先队名查表 → AI 提取值（仅当 >0.5）→ 兜底 1.3
+                home_team_name = params.get("home_team", "") or team1
+                away_team_name = params.get("away_team", "") or team2
+                h_lam_table = _DEFAULT_LAM.get(home_team_name, 1.3)
+                a_lam_table = _DEFAULT_LAM.get(away_team_name, 1.2)
+                h_lam_ai = _f("lam_h_initial", h_lam_table)
+                a_lam_ai = _f("lam_a_initial", a_lam_table)
+                # 拒绝 AI 的荒谬值（< 0.5 必定是提取错误）
+                h_lam_ai = h_lam_ai if h_lam_ai > 0.5 else h_lam_table
+                a_lam_ai = a_lam_ai if a_lam_ai > 0.5 else a_lam_table
                 pred = predict_match(
-                    home=params.get("home_team", ""),
-                    away=params.get("away_team", ""),
-                    lam_h0=_f("lam_h_initial", 1.3),
-                    lam_a0=_f("lam_a_initial", 1.3),
-                    mod=mod,
+                    home=home_team_name, away=away_team_name,
+                    lam_h0=h_lam_ai, lam_a0=a_lam_ai, mod=mod,
                     odds=odds,
                     lam_c=_f("lam_c", 0.02),
                     phi=_f("phi", 0.15),
