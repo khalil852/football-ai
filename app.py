@@ -7,10 +7,9 @@ import math
 import hashlib
 import random
 import string
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional
-from itertools import product
+from typing import Dict, Tuple
 from supabase import create_client, Client
 
 # =============================================================================
@@ -59,7 +58,6 @@ def _load_prompt(secret_name, filename):
     # 兜底：硬编码的空 prompt，避免 crash
     return f"# {secret_name} 未配置，请在 st.secrets 中设置"
 
-system_prompt_analysis = _load_prompt("analysis_prompt", "prompt_analysis.md")
 system_prompt_search = _load_prompt("search_prompt", "prompt_search.md")
 system_prompt_calibrate = _load_prompt("calibrate_prompt", "prompt_calibrate.md")
 
@@ -1154,6 +1152,7 @@ def load_record_to_session(record):
     st.session_state.current_record_id = record["id"]
     st.session_state.current_match_time = record.get("match_time")
     st.session_state.training_mode = record.get("training_mode", False)
+    st.session_state.math_prediction = None  # 历史记录无 math 对象，校准时仅用 LLM 模式
 
 def calibrate_record(record, max_attempts=3):
     # ---- 第一步：获取赛后数据 ----
@@ -1439,7 +1438,7 @@ if "training_mode" not in st.session_state:
     st.session_state.training_mode = False
 st.session_state.training_mode = training_mode
 
-col1, col2, col3 = st.columns(3)
+col1, col2 = st.columns(2)
 
 with col1:
     btn_label = "🔍 搜集赛前数据" if not training_mode else "🔍 搜集历史数据"
@@ -1575,9 +1574,7 @@ if st.button("🔍 搜集赛后数据并校准", use_container_width=True):
         can_cal, msg = can_calibrate(match_time)
 
         if not training_mode:
-            if can_cal:
-                st.success(msg)
-            else:
+            if not can_cal:
                 st.warning(msg)
                 if msg.startswith("⏳"):
                     st.stop()
@@ -1591,6 +1588,7 @@ if st.button("🔍 搜集赛后数据并校准", use_container_width=True):
                 success, calibration_report, new_laws, modified_laws = calibrate_record(record)
 
                 if success:
+                    st.success(msg if can_cal else "校准完成")
                     st.markdown(calibration_report)
                     if new_laws or modified_laws:
                         st.success(f"✅ 校准完成！已提炼出 {len(new_laws) if new_laws else 0} 条新定律草案和 {len(modified_laws) if modified_laws else 0} 条修改建议，请在下方定理控制台的【待处理的建议】中审核。")
