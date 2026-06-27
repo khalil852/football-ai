@@ -1056,13 +1056,27 @@ def ignore_modified_law(mod, record_id):
 st.title("⚽ 全维推演工厂 V2.6")
 match = st.text_input("输入比赛对阵（例如：法国 vs 塞内加尔）", placeholder="输入比赛名称...")
 
+# 训练模式：用于已结束的历史比赛，跳过时间锁，可直接校准
+training_mode = st.checkbox(
+    "历史比赛模式",
+    value=False,
+    help="开启后，跳过赛前时间检查，赛后校准按钮始终可用。适用于对已结束的比赛进行推演训练。"
+)
+if "training_mode" not in st.session_state:
+    st.session_state.training_mode = False
+st.session_state.training_mode = training_mode
+
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    if st.button("🔍 搜集赛前数据", use_container_width=True):
+    btn_label = "🔍 搜集赛前数据" if not training_mode else "🔍 搜集历史数据"
+    if st.button(btn_label, use_container_width=True):
         if match:
-            with st.spinner("正在搜索并汇总赛前数据，请耐心等待..."):
-                search_query = f"请为 {match} 搜集赛前关键信息，并严格按照模板格式输出。"
+            with st.spinner("正在搜索并汇总数据，请耐心等待..."):
+                if training_mode:
+                    search_query = f"请为 {match} 搜集比赛的完整信息（包括最终比分、进球者、关键事件、首发阵容等），并严格按照模板格式输出。请注意这是一场已经结束的比赛。"
+                else:
+                    search_query = f"请为 {match} 搜集赛前关键信息，并严格按照模板格式输出。"
                 result = call_deepseek(system_prompt_search, search_query, enable_search=True, search_mode="pre_match")
                 if result:
                     st.session_state.search_report = result
@@ -1072,15 +1086,23 @@ with col1:
                     if extracted_time:
                         st.success(f"✅ 开赛时间：{extracted_time}")
                     else:
-                        st.info("ℹ️ 未提取到开赛时间，赛后校准将需要手动确认。")
+                        if training_mode:
+                            st.session_state.current_match_time = "2000-01-01 00:00"  # 远古时间，保证 can_calibrate 通过
+                            st.info("ℹ️ 训练模式：已跳过时间校验，可直接校准。")
+                        else:
+                            st.info("ℹ️ 未提取到开赛时间，赛后校准将需要手动确认。")
         else:
             st.warning("请先输入比赛名称")
 
 with col2:
-    if st.button("🧠 开始全维推演", use_container_width=True):
+    btn_label2 = "🧠 开始全维推演" if not training_mode else "🧠 训练推演"
+    if st.button(btn_label2, use_container_width=True):
         if match and st.session_state.search_report:
             with st.spinner("正在进行全维推演，请耐心等待..."):
-                analysis_query = f"请基于以下赛前数据，对 {match} 进行推演。\n\n{st.session_state.search_report}"
+                if training_mode:
+                    analysis_query = f"请基于以下比赛数据（注意：这是已结束的历史比赛，数据中可能包含最终比分），对 {match} 进行推演。请忽略最终比分，模拟赛前视角进行分析。\n\n{st.session_state.search_report}"
+                else:
+                    analysis_query = f"请基于以下赛前数据，对 {match} 进行推演。\n\n{st.session_state.search_report}"
                 result = call_deepseek(system_prompt_analysis, analysis_query, enable_search=False)
                 if result:
                     st.session_state.analysis_report = result
@@ -1108,14 +1130,16 @@ if st.button("🔍 搜集赛后数据并校准", use_container_width=True):
         match_time = st.session_state.get("current_match_time")
         can_cal, msg = can_calibrate(match_time)
 
-        if can_cal:
-            st.success(msg)
+        if not training_mode:
+            if can_cal:
+                st.success(msg)
+            else:
+                st.warning(msg)
+                if msg.startswith("⏳"):
+                    st.stop()
         else:
-            st.warning(msg)
-            if msg.startswith("⏳"):
-                # 比赛未开赛或进行中 → 硬阻挡
-                st.stop()
-            # 无法判定时间（⚠️开头）→ 软阻挡，允许继续尝试
+            st.info("训练模式：已跳过时间校验。")
+
         with st.spinner("正在搜集赛后完整数据，请耐心等待..."):
             response = supabase.table("history").select("*").eq("username", st.session_state.username).eq("match", st.session_state.current_match).order("timestamp", desc=True).limit(1).execute()
             if response.data:
@@ -1322,9 +1346,11 @@ else:
 
             if not rec.get("calibration"):
                 can_cal, cal_msg = can_calibrate(match_time)
-                if can_cal:
-                    # 已结束 → 直接显示校准按钮
-                    st.success(cal_msg)
+                if can_cal or training_mode:
+                    if can_cal:
+                        st.success(cal_msg)
+                    else:
+                        st.info("训练模式：已跳过时间校验。")
                     if st.button(f"🔍 校准此记录", key=f"calibrate_{i}"):
                         with st.spinner(f"正在校准 {rec['match']}..."):
                             success, report, _, _ = calibrate_record(rec)
@@ -1335,10 +1361,8 @@ else:
                             else:
                                 st.warning(report)
                 elif cal_msg.startswith("⏳"):
-                    # 未开赛/进行中 → 硬阻挡
                     st.warning(cal_msg)
                 else:
-                    # ⚠️ 无法判定时间 → 软阻挡，按钮可用
                     st.warning(cal_msg + " 如已确认比赛结束可尝试。")
                     if st.button(f"🔍 强制校准此记录", key=f"calibrate_{i}"):
                         with st.spinner(f"正在校准 {rec['match']}..."):
