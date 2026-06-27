@@ -1449,14 +1449,14 @@ with col2:
                         f"置信度 {pred.confidence*100:.0f}%)")
 
             with st.spinner("正在生成推演报告..."):
-                # 4. LLM 基于数学结果生成自然语言报告
+                if not merged:
+                    st.info("定律库未返回修正因子，使用默认参数。可通过校准反馈逐步优化。")
+
                 modifier_info = {
-                    k: v for k, v in {
-                        "attack": mod.attack, "defense": mod.defense,
-                        "tactical": mod.tactical, "coach_intent": mod.coach_intent,
-                        "scenario": mod.scenario, "home_adv": mod.home_adv,
-                        "confidence": mod.confidence,
-                    }.items() if v != 1.0
+                    "attack": mod.attack, "defense": mod.defense,
+                    "tactical": mod.tactical, "coach_intent": mod.coach_intent,
+                    "scenario": mod.scenario, "home_adv": mod.home_adv,
+                    "confidence": mod.confidence,
                 }
                 for k, v in mod._extra.items():
                     modifier_info[k] = v
