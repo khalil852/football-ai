@@ -489,20 +489,23 @@ def _try_football_api(match_query, search_mode):
         return ""
 
     try:
-        # 找到本场 fixture
-        resp = requests.get(
-            f"{FOOTBALL_URL}/fixtures",
-            params={"team": t1_id, "season": 2026},
-            headers=FOOTBALL_HEADERS,
-            timeout=10
-        )
-        data = resp.json()
+        # 跨赛季搜索（免费版无 2026 数据，回退到 2024-2022）
         fixture = None
-        for f in data.get("response", []):
-            h_id = f["teams"]["home"]["id"]
-            a_id = f["teams"]["away"]["id"]
-            if (h_id == t1_id and a_id == t2_id) or (h_id == t2_id and a_id == t1_id):
-                fixture = f
+        for season in [2026, 2025, 2024, 2022]:
+            resp = requests.get(
+                f"{FOOTBALL_URL}/fixtures",
+                params={"team": t1_id, "season": season},
+                headers=FOOTBALL_HEADERS,
+                timeout=10
+            )
+            data = resp.json()
+            for f in data.get("response", []):
+                h_id = f["teams"]["home"]["id"]
+                a_id = f["teams"]["away"]["id"]
+                if (h_id == t1_id and a_id == t2_id) or (h_id == t2_id and a_id == t1_id):
+                    fixture = f
+                    break
+            if fixture:
                 break
 
         if not fixture:
@@ -695,18 +698,27 @@ def _search_with_tavily(system_prompt, user_query, search_mode="pre_match"):
     if not TAVILY_API_KEY:
         return ""
 
+    # extract clean match name for search keywords
+    search_target = user_query
+    for sep in [r'\s+vs\s+', r'\s+v\s+', r'\s+对阵\s+', r'\s+对\s+']:
+        parts = re.split(sep, user_query, flags=re.IGNORECASE)
+        if len(parts) == 2:
+            left = [w for w in parts[0].split() if re.search(r'[一-鿿]|[a-zA-Z]', w)]
+            righ = [w for w in parts[1].split() if re.search(r'[一-鿿]|[a-zA-Z]', w)]
+            if left and righ:
+                search_target = f"{left[-1]} vs {righ[0]}"
+                break
+
     if search_mode == "pre_match":
         search_rounds = [
-            f"{user_query} 首发阵容 伤病 历史交锋",
-            f"{user_query} 赔率 裁判 赛前新闻 教练发言",
-            f"{user_query} 出线形势 战术分析 关键球员",
+            f"{search_target} 首发阵容 伤病 历史交锋",
+            f"{search_target} 赔率 裁判 赛前新闻 教练发言",
         ]
     else:
         search_rounds = [
-            f"{user_query} 最终比分 进球者 进球时间",
-            f"{user_query} full time result goals scorers match report",
-            f"{user_query} 赛后技术统计 赛后报告 关键事件 红黄牌",
-            f"{user_query} match statistics final score lineups",
+            f'"{search_target}" final score result goalscorers',
+            f"{search_target} 最終比分 进球者 赛后技术统计",
+            f'"{search_target}" match report statistics',
         ]
 
     all_results = ""
