@@ -922,7 +922,7 @@ def calibrate_all_uncalibrated():
     for i, rec in enumerate(uncalibrated):
         status_text.text(f"正在校准：{rec['match']} ({i+1}/{len(uncalibrated)})")
         can_cal, msg = can_calibrate(rec.get("match_time"))
-        if not can_cal:
+        if msg.startswith("⏳"):
             st.warning(f"⏭️ {rec['match']}：{msg}")
             skipped_count += 1
         else:
@@ -1309,6 +1309,8 @@ else:
             if not rec.get("calibration"):
                 can_cal, cal_msg = can_calibrate(match_time)
                 if can_cal:
+                    # 已结束 → 直接显示校准按钮
+                    st.success(cal_msg)
                     if st.button(f"🔍 校准此记录", key=f"calibrate_{i}"):
                         with st.spinner(f"正在校准 {rec['match']}..."):
                             success, report, _, _ = calibrate_record(rec)
@@ -1318,8 +1320,21 @@ else:
                                 st.rerun()
                             else:
                                 st.warning(report)
-                else:
+                elif cal_msg.startswith("⏳"):
+                    # 未开赛/进行中 → 硬阻挡
                     st.warning(cal_msg)
+                else:
+                    # ⚠️ 无法判定时间 → 软阻挡，按钮可用
+                    st.warning(cal_msg + " 如已确认比赛结束可尝试。")
+                    if st.button(f"🔍 强制校准此记录", key=f"calibrate_{i}"):
+                        with st.spinner(f"正在校准 {rec['match']}..."):
+                            success, report, _, _ = calibrate_record(rec)
+                            if success:
+                                st.success(f"{rec['match']} 校准成功！")
+                                st.markdown(report)
+                                st.rerun()
+                            else:
+                                st.warning(report)
 
             st.markdown("### 📡 赛前数据")
             st.markdown(rec["search_report"])
