@@ -1556,9 +1556,18 @@ with col2:
                 a_lam_table = _DEFAULT_LAM.get(away_team_name, 1.2)
                 h_lam_ai = _f("lam_h_initial", h_lam_table)
                 a_lam_ai = _f("lam_a_initial", a_lam_table)
-                # 拒绝 AI 的荒谬值（< 0.5 必定是提取错误）
-                h_lam_ai = h_lam_ai if h_lam_ai > 0.5 else h_lam_table
-                a_lam_ai = a_lam_ai if a_lam_ai > 0.5 else a_lam_table
+                # 拒绝 AI 的荒谬值（< 0.8 或 > 4.0 必定是提取错误）
+                h_lam_ai = h_lam_ai if 0.8 <= h_lam_ai <= 4.0 else h_lam_table
+                a_lam_ai = a_lam_ai if 0.8 <= a_lam_ai <= 4.0 else a_lam_table
+
+                # 硬门槛：修正后的有效 λ 不得低于 0.3
+                test_h = mod.apply(h_lam_ai, is_home=True)
+                test_a = mod.apply(a_lam_ai, is_home=False)
+                if test_h < 0.3 or test_a < 0.3:
+                    mod = LambdaModifiers(home_adv=1.08 if params.get("home_adv", False) else 1.0)
+                    h_lam_ai, a_lam_ai = h_lam_table, a_lam_table
+                    st.warning("AI 修正因子异常，已回退到队名基准值。可通过校准反馈修正。")
+
                 pred = predict_match(
                     home=home_team_name, away=away_team_name,
                     lam_h0=h_lam_ai, lam_a0=a_lam_ai, mod=mod,
@@ -1567,7 +1576,6 @@ with col2:
                     phi=_f("phi", 0.15),
                 )
                 st.session_state.math_prediction = pred
-                # 定律对置信度的修正
                 pred.confidence *= mod.confidence
                 st.info(f"数学引擎完成 (λ_h={pred.lam_h:.2f}, λ_a={pred.lam_a:.2f}, "
                         f"置信度 {pred.confidence*100:.0f}%)")
