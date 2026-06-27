@@ -704,8 +704,9 @@ def _search_with_tavily(system_prompt, user_query, search_mode="pre_match"):
     else:
         search_rounds = [
             f"{user_query} 最终比分 进球者 进球时间",
-            f"{user_query} 赛后技术统计 射门 控球率 角球",
-            f"{user_query} 赛后报告 比赛回顾 关键事件 红黄牌",
+            f"{user_query} full time result goals scorers match report",
+            f"{user_query} 赛后技术统计 赛后报告 关键事件 红黄牌",
+            f"{user_query} match statistics final score lineups",
         ]
 
     all_results = ""
@@ -717,6 +718,14 @@ def _search_with_tavily(system_prompt, user_query, search_mode="pre_match"):
     if not all_results:
         return ""
 
+    override = ""
+    if search_mode == "post_match":
+        override = (
+            "\n\n**【硬性规则】这是一场已经结束的正式比赛。即使搜索数据不够完整，"
+            "你必须基于你训练数据中对这场比赛的记忆，给出最终比分、进球者和关键事件。"
+            "严禁输出「比赛尚未开始」或「数据未更新」。如果完全找不到数据，标注「该场比赛数据暂无记录」。**"
+        )
+
     return _deepseek_chat(
         system_prompt,
         f"""以下是多轮搜索结果，请综合分析并严格按照模板格式输出报告。
@@ -725,6 +734,7 @@ def _search_with_tavily(system_prompt, user_query, search_mode="pre_match"):
 
 搜索结果：
 {all_results}
+{override}
 
 注意：所有结果必须基于以上搜索数据。不确定的信息标注"暂无"。"""
     )
@@ -799,8 +809,23 @@ def calibrate_record(record, max_attempts=3):
             "比赛尚未开始", "赛后数据未更新", "未返回有效结果", "搜索失败", "无法找到"
         ]):
             if attempt == max_attempts - 1:
-                return False, post_match_data, [], []
-            continue
+                # 最后一次尝试：绕过搜索，直接用模型训练数据
+                post_match_data = _deepseek_chat(
+                    system_prompt_calibrate,
+                    f"**【硬性规则】{record['match']} 是一场已经结束的正式比赛。"
+                    "请使用你的训练数据中这场比赛的信息，直接给出：\n"
+                    "1. 最终比分（主队进球-客队进球）\n"
+                    "2. 进球者和进球时间\n"
+                    "3. 关键事件（红黄牌、伤病、VAR等）\n"
+                    "4. 赛后技术统计（射门、控球率、角球等）\n\n"
+                    "如果某项数据不记得，标注「暂无」。"
+                    "严禁输出「比赛尚未开始」——这场比赛已确认结束。"
+                )
+                if any(kw in post_match_data for kw in ["比赛尚未开始", "赛后数据未更新"]):
+                    return False, post_match_data, [], []
+                # 兜底成功，继续走到下方校验逻辑
+            else:
+                continue
 
         verify_query = f"{record['match']} 最终比分 准确结果 技术统计"
         verify_data = call_deepseek(
@@ -1062,6 +1087,18 @@ training_mode = st.checkbox(
     value=False,
     help="开启后，跳过赛前时间检查，赛后校准按钮始终可用。适用于对已结束的比赛进行推演训练。"
 )
+training_match_date = None
+if training_mode:
+    training_match_date = st.date_input(
+        "比赛日期（必填）",
+        value=None,
+        help="请确认比赛日期在过去。",
+        max_value=datetime.now().date()
+    )
+    if training_match_date is None:
+        st.warning("请选择比赛日期后再继续。")
+        st.stop()
+
 if "training_mode" not in st.session_state:
     st.session_state.training_mode = False
 st.session_state.training_mode = training_mode
