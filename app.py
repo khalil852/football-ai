@@ -775,6 +775,7 @@ def call_deepseek(system_prompt, user_query, enable_search=False, search_mode="p
 # ============ 历史记录管理 ============
 def save_record(match, search_report, analysis_report):
     match_time = extract_match_time(search_report)
+    is_training = st.session_state.get("training_mode", False)
     record = {
         "username": st.session_state.username,
         "match": match,
@@ -782,7 +783,8 @@ def save_record(match, search_report, analysis_report):
         "search_report": search_report,
         "analysis_report": analysis_report,
         "calibration": None,
-        "match_time": match_time
+        "match_time": match_time,
+        "training_mode": is_training
     }
     supabase.table("history").insert(record).execute()
 
@@ -796,6 +798,7 @@ def load_record_to_session(record):
     st.session_state.current_match = record["match"]
     st.session_state.current_record_id = record["id"]
     st.session_state.current_match_time = record.get("match_time")
+    st.session_state.training_mode = record.get("training_mode", False)
 
 def calibrate_record(record, max_attempts=3):
     for attempt in range(max_attempts):
@@ -1356,6 +1359,8 @@ else:
         match_time = rec.get("match_time")
         status_text, status_icon = get_match_status(match_time)
         title = f"{status_icon} {rec['match']} | {rec['timestamp']} | {status_text}"
+        if rec.get("training_mode"):
+            title += " | 🎓 训练"
         if rec.get("calibration"):
             title += " | 🟢 已校准"
         else:
@@ -1382,8 +1387,9 @@ else:
                     st.rerun()
 
             if not rec.get("calibration"):
+                is_training = rec.get("training_mode", False)
                 can_cal, cal_msg = can_calibrate(match_time)
-                if can_cal or training_mode:
+                if can_cal or is_training:
                     if can_cal:
                         st.success(cal_msg)
                     else:
