@@ -463,12 +463,15 @@ class LambdaModifiers:
         kwargs = {"home_adv": 1.08 if home_adv else 1.0}
         extra = {}
         for k, v in merged_modifiers.items():
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                continue
             if k in known:
                 kwargs[k] = v
             elif k == "home_adv":
                 kwargs["home_adv"] = v
             else:
-                # 用户自定义维度——放入 _extra，apply 时乘进去
                 extra[k] = v
         return cls(**kwargs, _extra=extra)
 
@@ -1475,6 +1478,10 @@ with col2:
                 params = _extract_params(st.session_state.search_report,
                                          laws_data.get("laws", []))
                 # 2. 从定律分析结果构建修正因子（兼容任意用户定律）
+                def _f(key, default=1.0):
+                    try: return float(params.get(key, default))
+                    except: return default
+
                 merged = params.get("merged_modifiers", {})
                 if merged:
                     mod = LambdaModifiers.from_merged(
@@ -1484,26 +1491,30 @@ with col2:
                 else:
                     # 回退：旧格式（无 merged_modifiers）
                     mod = LambdaModifiers(
-                        attack=params.get("attack", 1.0),
-                        defense=params.get("defense", 1.0),
-                        tactical=params.get("tactical", 1.0),
-                        coach_intent=params.get("coach_intent", 1.0),
-                        scenario=params.get("scenario", 1.0),
+                        attack=_f("attack"), defense=_f("defense"),
+                        tactical=_f("tactical"), coach_intent=_f("coach_intent"),
+                        scenario=_f("scenario"),
                         home_adv=1.08 if params.get("home_adv", False) else 1.0,
                     )
                 # 3. 数学引擎推演
                 odds = None
-                if params.get("odds_h") and params.get("odds_d") and params.get("odds_a"):
-                    odds = (params["odds_h"], params["odds_d"], params["odds_a"])
+                try:
+                    oh = float(params.get("odds_h", 0))
+                    od = float(params.get("odds_d", 0))
+                    oa = float(params.get("odds_a", 0))
+                    if oh and od and oa:
+                        odds = (oh, od, oa)
+                except Exception:
+                    pass
                 pred = predict_match(
                     home=params.get("home_team", ""),
                     away=params.get("away_team", ""),
-                    lam_h0=params.get("lam_h_initial", 1.3),
-                    lam_a0=params.get("lam_a_initial", 1.3),
+                    lam_h0=_f("lam_h_initial", 1.3),
+                    lam_a0=_f("lam_a_initial", 1.3),
                     mod=mod,
                     odds=odds,
-                    lam_c=params.get("lam_c", 0.05),
-                    phi=params.get("phi", 0.15),
+                    lam_c=_f("lam_c", 0.05),
+                    phi=_f("phi", 0.15),
                 )
                 st.session_state.math_prediction = pred
                 # 定律对置信度的修正
