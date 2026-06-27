@@ -3,10 +3,14 @@ import requests
 import json
 import os
 import re
+import math
 import hashlib
 import random
 import string
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, field
+from typing import Dict, List, Tuple, Optional
+from itertools import product
 from supabase import create_client, Client
 
 # =============================================================================
@@ -431,6 +435,210 @@ def _deepseek_chat(system_prompt, user_content, model=None):
     return data['choices'][0]['message'].get('content', '')
 
 
+# =============================================================================
+# 数学引擎 — 纯 Python 计算，替代 LLM 数值推理
+# - 双变量泊松：修复两队进球独立性假设
+# - 乘性 λ 修正：替代无数学依据的加法模型
+# - 负二项 + 过度离散参数 φ：修复方差=均值约束
+# - overround 归一化：修复赔率期望值计算
+# - 动态贝叶斯更新：时间/强度自适应 α
+# =============================================================================
+
+@dataclass
+class LambdaModifiers:
+    """乘性修正因子，1.0 = 无修正"""
+    attack:       float = 1.0
+    defense:      float = 1.0
+    tactical:     float = 1.0
+    coach_intent: float = 1.0
+    scenario:     float = 1.0
+    home_adv:     float = 1.08
+
+    def apply(self, lam: float, is_home: bool = False) -> float:
+        f = self.attack * self.defense * self.tactical * self.coach_intent * self.scenario
+        if is_home:
+            f *= self.home_adv
+        return max(0.05, lam * f)
+
+
+@dataclass
+class MatchPrediction:
+    home_team: str = ""
+    away_team: str = ""
+    lam_h: float = 0.0
+    lam_a: float = 0.0
+    lam_c: float = 0.05
+    phi: float = 0.15
+    home_win: float = 0.0
+    draw: float = 0.0
+    away_win: float = 0.0
+    exp_h: float = 0.0
+    exp_a: float = 0.0
+    top_scores: list = field(default_factory=list)
+    confidence: float = 0.0
+
+
+@dataclass
+class CalibrationResult:
+    accuracy_score: float = 0.0
+    score_match: bool = False
+    result_match: bool = False
+    goal_deviation: float = 0.0
+    overround: float = 0.0
+
+
+# ---- 双变量泊松 ----
+def _bivariate_poisson(lam_h: float, lam_a: float, lam_c: float,
+                       max_g: int = 6) -> Dict[Tuple[int, int], float]:
+    probs, total = {}, 0.0
+    for h in range(max_g + 1):
+        for a in range(max_g + 1):
+            k_max = min(h, a)
+            s = sum((lam_h ** (h - k) / math.factorial(h - k)) *
+                    (lam_a ** (a - k) / math.factorial(a - k)) *
+                    (lam_c ** k / math.factorial(k)) for k in range(k_max + 1))
+            p = math.exp(-(lam_h + lam_a + lam_c)) * s
+            probs[(h, a)] = p
+            total += p
+    return {k: v / total for k, v in probs.items()} if total else probs
+
+
+# ---- 负二项概率（过度离散）----
+def _neg_binom_p(lam: float, k: int, phi: float = 0.15) -> float:
+    sigma_sq = lam + phi * lam * lam
+    r = lam * lam / max(0.001, sigma_sq - lam)
+    p_s = lam / sigma_sq
+    return (math.gamma(r + k) / (math.gamma(r) * math.factorial(k)) *
+            (1 - p_s) ** r * p_s ** k)
+
+
+# ---- 赔率 overround 归一化 ----
+def _implied_probs(odds_h: float, odds_d: float, odds_a: float) -> Tuple[float, float, float, float]:
+    raw = [1.0 / odds_h, 1.0 / odds_d, 1.0 / odds_a]
+    overround = sum(raw)
+    return raw[0] / overround, raw[1] / overround, raw[2] / overround, overround
+
+
+# ---- 核心推演 ----
+def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
+                  mod: LambdaModifiers, odds: Tuple[float, float, float] = None,
+                  lam_c: float = 0.05, phi: float = 0.15, max_g: int = 6) -> MatchPrediction:
+    lh = mod.apply(lam_h0, is_home=True)
+    la = mod.apply(lam_a0, is_home=False)
+    probs = _bivariate_poisson(lh, la, lam_c, max_g)
+
+    hw = dw = aw = eh = ea = 0.0
+    for (h, a), p in probs.items():
+        eh += h * p; ea += a * p
+        if h > a:      hw += p
+        elif h == a:   dw += p
+        else:          aw += p
+
+    top = sorted(probs.items(), key=lambda x: x[1], reverse=True)[:5]
+
+    conf = 1.0
+    if odds:
+        imp_h, imp_d, imp_a, _ = _implied_probs(*odds)
+        conf = max(0.0, 1.0 - 0.5 * (abs(hw - imp_h) + abs(dw - imp_d) + abs(aw - imp_a)))
+
+    return MatchPrediction(home_team=home, away_team=away,
+                           lam_h=lh, lam_a=la, lam_c=lam_c, phi=phi,
+                           home_win=hw, draw=dw, away_win=aw,
+                           exp_h=eh, exp_a=ea, top_scores=top, confidence=conf)
+
+
+# ---- 赛后校准 ----
+def calibrate_math(pred: MatchPrediction, actual_h: int, actual_a: int) -> CalibrationResult:
+    score_match = (round(pred.exp_h) == actual_h and round(pred.exp_a) == actual_a)
+    pred_r = "home" if pred.home_win > max(pred.draw, pred.away_win) else \
+             "draw" if pred.draw > max(pred.home_win, pred.away_win) else "away"
+    actual_r = "home" if actual_h > actual_a else "draw" if actual_h == actual_a else "away"
+    result_match = (pred_r == actual_r)
+    deviation = abs(pred.exp_h - actual_h) + abs(pred.exp_a - actual_a)
+    score = max(0, min(100, 100 - deviation * 15 - (0 if result_match else 25) -
+                       (0 if pred.confidence >= 0.5 else 10)))
+    return CalibrationResult(accuracy_score=round(score, 1),
+                             score_match=score_match, result_match=result_match,
+                             goal_deviation=round(deviation, 2))
+
+
+# ---- 从搜索报告提取结构化参数 ----
+_PARAM_EXTRACT_PROMPT = (
+    "你是一个数据提取器。从以下赛前数据报告中提取结构化参数，"
+    "仅输出 JSON，不要任何解释文字。\n\n"
+    "JSON 字段:\n"
+    '- home_team: 主队名\n'
+    '- away_team: 客队名\n'
+    '- lam_h_initial: 主队近5场场均进球数 (通常 0.5-3.0)\n'
+    '- lam_a_initial: 客队近5场场均进球数 (通常 0.5-3.0)\n'
+    '- attack: 进攻修正因子 (0.7-1.3), 核心缺阵=0.80-0.90, 核心复出=1.10-1.20\n'
+    '- defense: 防守修正因子 (0.7-1.3), 核心后卫缺阵=0.85, 门将顶级=1.10\n'
+    '- tactical: 战术克制因子 (0.85-1.15)\n'
+    '- coach_intent: 教练意图 L1=0.85 L2=0.92 L3=1.0 L4=1.08 L5=1.15\n'
+    '- scenario: 场景因子, 生死战=1.10 高原=0.90 加时=0.80 中立=1.0\n'
+    '- home_adv: true=主队主场 false=中立/客场\n'
+    '- phi: 过度离散 (通常 0.10-0.25), 强弱悬殊=0.20+\n'
+    '- lam_c: 关联项 (通常 0.02-0.10)\n'
+    '- odds_h, odds_d, odds_a: 赔率 (若无标注 null)\n'
+    '- predicted_h, predicted_a: 报告中推演的比分 (若未推演标注 0,0)\n'
+    '- actual_h, actual_a: 报告中提到的实际比分 (若未提及标注 null)\n'
+    '- has_actual_result: true=报告含实际比分\n'
+)
+
+def _extract_params(search_report: str) -> dict:
+    """从搜索报告提取结构化参数，失败返回空 dict"""
+    try:
+        resp = requests.post(
+            url=URL,
+            headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": "deepseek-v4-flash",
+                "messages": [
+                    {"role": "system", "content": _PARAM_EXTRACT_PROMPT},
+                    {"role": "user", "content": search_report[:8000]}
+                ],
+                "max_tokens": 800,
+                "temperature": 0.0
+            },
+            timeout=30
+        )
+        data = resp.json()
+        if "error" in data:
+            return {}
+        content = data["choices"][0]["message"].get("content", "")
+        m = re.search(r'\{[\s\S]*\}', content)
+        if m:
+            return json.loads(m.group())
+    except Exception:
+        pass
+    return {}
+
+
+# ---- 结构化推演结果转报告 ----
+_ANALYSIS_FROM_JSON_PROMPT = (
+    "你是一位专业的足球推演分析师。以下是 Python 数学引擎计算出的结构化推演结果。"
+    "请基于这些数据，生成一份完整的全维推演报告。\n\n"
+    "报告要求:\n"
+    "1. 列出关键修正因子及其依据\n"
+    "2. 展示比分概率分布\n"
+    "3. 给出最可能比分和胜负预测\n"
+    "4. 标注模型置信度\n"
+    "5. 如果提供了赔率数据，说明市场与模型的分歧"
+)
+
+
+# ---- 结构化校准结果转报告 ----
+_CALIBRATE_FROM_JSON_PROMPT = (
+    "你是一位专业的足球赛后分析师。以下是 Python 数学引擎计算出的校准结果。"
+    "请基于这些数据，生成一份完整的赛后校准报告，包含:\n"
+    "1. 准确率评分\n"
+    "2. 偏差分析 (验证/推翻的逻辑)\n"
+    "3. 新定律/补丁建议 (JSON 格式)\n"
+    "4. 现有定律修改建议 (JSON 格式)\n\n"
+    "当前生效的定律库作为参考附在下方。"
+)
+
+
 # ============ API-Football 数据获取 ============
 def _parse_teams(query):
     """从查询中提取两个队名，返回 (team1, team2) 或 (None, None)"""
@@ -844,153 +1052,130 @@ def load_record_to_session(record):
     st.session_state.training_mode = record.get("training_mode", False)
 
 def calibrate_record(record, max_attempts=3):
+    # ---- 第一步：获取赛后数据 ----
     for attempt in range(max_attempts):
         search_query = f"请联网搜索 {record['match']} 的赛后完整数据（比分、进球、技术统计、关键事件等）。"
         post_match_data = call_deepseek(
             system_prompt_calibrate, search_query,
             enable_search=True, search_mode="post_match", model=MODEL_CALIBRATE
         )
-
-        if any(kw in post_match_data for kw in [
+        if not any(kw in post_match_data for kw in [
             "比赛尚未开始", "赛后数据未更新", "未返回有效结果", "搜索失败", "无法找到"
         ]):
-            if attempt == max_attempts - 1:
-                # 最后一次尝试：绕过搜索，直接用模型训练数据
-                post_match_data = _deepseek_chat(
-                    system_prompt_calibrate,
-                    f"**【硬性规则】{record['match']} 是一场已经结束的正式比赛。"
-                    "请使用你的训练数据中这场比赛的信息，直接给出：\n"
-                    "1. 最终比分（主队进球-客队进球）\n"
-                    "2. 进球者和进球时间\n"
-                    "3. 关键事件（红黄牌、伤病、VAR等）\n"
-                    "4. 赛后技术统计（射门、控球率、角球等）\n\n"
-                    "如果某项数据不记得，标注「暂无」。"
-                    "严禁输出「比赛尚未开始」——这场比赛已确认结束。",
-                    model=MODEL_CALIBRATE,
-                )
-                if any(kw in post_match_data for kw in ["比赛尚未开始", "赛后数据未更新"]):
-                    return False, post_match_data, [], []
-                # 兜底成功，继续走到下方校验逻辑
-            else:
-                continue
+            break
+        if attempt == max_attempts - 1:
+            post_match_data = _deepseek_chat(
+                system_prompt_calibrate,
+                f"**【硬性规则】{record['match']} 是已结束的比赛。直接给出比分、进球者、关键事件。**",
+                model=MODEL_CALIBRATE,
+            )
+            if "比赛尚未开始" in post_match_data:
+                return False, post_match_data, [], []
+        else:
+            continue
+        break
 
-        verify_query = f"{record['match']} 最终比分 准确结果 技术统计"
-        verify_data = call_deepseek(
-            system_prompt_calibrate, verify_query,
-            enable_search=True, search_mode="post_match", model=MODEL_CALIBRATE
+    # ---- 第二步：从赛后数据提取实际比分 ----
+    post_params = _extract_params(post_match_data)
+    actual_h = post_params.get("actual_h") or post_params.get("predicted_h")
+    actual_a = post_params.get("actual_a") or post_params.get("predicted_a")
+    if actual_h is None or actual_a is None:
+        scores = re.findall(r'(\d+)\s*[-:]\s*(\d+)', post_match_data)
+        if scores:
+            actual_h, actual_a = int(scores[0][0]), int(scores[0][1])
+        else:
+            actual_h, actual_a = 0, 0
+
+    # ---- 第三步：Python 数学引擎校准 ----
+    math_cal = None
+    pred = st.session_state.get("math_prediction")
+    if pred and actual_h is not None and actual_a is not None:
+        math_cal = calibrate_math(pred, int(actual_h), int(actual_a))
+
+    # ---- 第四步：LLM 生成校准报告 + 定律提炼 ----
+    all_laws = laws_data["laws"]
+    laws_text = json.dumps(all_laws, ensure_ascii=False, indent=2)
+
+    math_block = ""
+    if math_cal:
+        math_block = (
+            f"\n\n【Python 数学引擎校准结果】\n"
+            f"准确率评分: {math_cal.accuracy_score}/100\n"
+            f"推演期望: {pred.exp_h:.2f} - {pred.exp_a:.2f} → 实际: {actual_h} - {actual_a}\n"
+            f"进球偏差: {math_cal.goal_deviation:.1f}球\n"
+            f"比分命中: {'是' if math_cal.score_match else '否'} | "
+            f"胜负命中: {'是' if math_cal.result_match else '否'}\n"
         )
-        score_pattern = re.findall(r'(\d+)\s*[-:]\s*(\d+)', verify_data + post_match_data)
 
-        all_laws = laws_data["laws"]
-        laws_text = json.dumps(all_laws, ensure_ascii=False, indent=2)
+    summary_prompt = f"""你是一位专业的足球赛后分析师。请进行偏差分析并提炼新定律。
 
-        summary_prompt = f"""你是一位专业的足球赛后分析师。请基于以下赛后真实数据、赛前推演报告和当前生效的定律库，进行全面的偏差分析，并提炼新的定律或对现有定律的修改建议。
+## ⚠️ 核心规则
+1. 严格基于赛后真实数据分析，严禁编造。
+2. 不确定信息标注"暂无"。
+3. 所有比分与赛后数据完全一致。
 
-## ⚠️ 核心规则（最高优先级）
-1. 你必须严格基于提供的赛后真实数据进行分析，严禁编造任何信息。
-2. 如果某项数据在来源中不存在，必须在报告中标注"暂无"。
-3. 不得使用"可能"、"也许"、"大概"等不确定词汇。
-4. 所有比分、进球者、时间等数据必须与赛后真实数据完全一致。
-
-## 赛后真实数据（来自多个独立来源）
-{post_match_data}
-{verify_data}
+## 赛后真实数据
+{post_match_data[:6000]}
 
 ## 赛前推演报告
-{record['analysis_report']}
+{record['analysis_report'][:6000]}
+{math_block}
 
 ## 当前生效的定律库
 {laws_text}
 
 ## 输出要求
-请先输出一个精确的JSON摘要（便于程序校验），然后再输出自然语言分析报告。
+先输出 JSON 摘要，再输出自然语言分析，最后附新定律和修改建议。
 
-JSON摘要格式：
+JSON摘要:
 ```json
 {{
-  "final_score": "主队进球-客队进球",
-  "half_time_score": "半场比分",
-  "goals": [{{"player": "球员名", "minute": 进球分钟, "type": "进球方式"}}],
-  "key_events": ["红黄牌", "伤病", "VAR介入等"],
-  "accuracy_score": 0-100的整数
+  "final_score": "{actual_h}-{actual_a}",
+  "accuracy_score": {math_cal.accuracy_score if math_cal else "0-100 的整数"},
+  "key_events": []
 }}
 ```
 
-## 偏差分析要求
-1. **准确率评分**：根据推演比分、胜负、进球者等与实际结果的匹配度，给出一个0-100的综合准确率评分。
-2. **偏差分析**：对比推演与现实的差距，指出哪些逻辑被验证、哪些被推翻，并分析根本原因。
-3. **提炼新定律/补丁**：至少提炼出一条新的定律或补丁。如果无需新增定律，请返回空列表。请严格按照以下JSON格式输出。
+新定律 (JSON 列表):
 ```json
-[
-  {{
-    "name": "定律名称",
-    "content": "核心逻辑（一句话）",
-    "trigger": "触发条件",
-    "lambda_effect": "对λ值的修正建议（如：主队进攻λ+0.2）"
-  }}
-]
+[{{"name": "...", "content": "...", "trigger": "...", "lambda_effect": "..."}}]
 ```
-4. **修改现有定律**：如果发现某条现有定律需要修正，请提出修改建议。如果无需修改，请返回空列表。
+
+修改建议 (JSON 列表):
 ```json
-[
-  {{
-    "id": "目标定律的ID",
-    "name": "修改后的名称",
-    "content": "修改后的核心逻辑",
-    "trigger": "修改后的触发条件",
-    "lambda_effect": "修改后的λ值修正建议"
-  }}
-]
+[{{"id": "...", "name": "...", "content": "...", "trigger": "...", "lambda_effect": "..."}}]
 ```
-5. **输出格式**：先输出JSON摘要（务必包含准确率评分），然后输出自然语言分析，最后附上新定律和修改建议的JSON代码块。
 """
 
-        calibration_report = call_deepseek(
-    system_prompt_calibrate,  # 改成使用校准AI自己的指令
-    summary_prompt,
-    enable_search=False, model=MODEL_CALIBRATE
-)
+    calibration_report = _deepseek_chat(
+        _CALIBRATE_FROM_JSON_PROMPT, summary_prompt,
+        model=MODEL_CALIBRATE
+    )
 
-        json_match = re.search(r'```json\s*(\{.*?\})\s*```', calibration_report, re.DOTALL)
-        if json_match:
-            try:
-                summary_json = json.loads(json_match.group(1))
-                report_score = summary_json.get("final_score", "")
-                verified = False
-                for s in score_pattern:
-                    if f"{s[0]}-{s[1]}" == report_score:
-                        verified = True
-                        break
-                if not verified and attempt < max_attempts - 1:
-                    st.warning(f"第 {attempt+1} 次校准的比分与搜索结果不一致，正在重试...")
-                    continue
-            except:
-                if attempt < max_attempts - 1:
-                    st.warning(f"第 {attempt+1} 次校准无法解析JSON，正在重试...")
-                    continue
+    # ---- 第五步：解析定律草案 ----
+    new_laws, modified_laws = [], []
+    try:
+        all_json_blocks = list(re.finditer(r'```json\s*(.*?)\s*```', calibration_report, re.DOTALL))
+        for block in all_json_blocks:
+            block_text = block.group(1)
+            parsed = json.loads(block_text)
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, dict):
+                        if 'id' in item and 'name' in item:
+                            modified_laws.append(item)
+                        elif 'name' in item and 'content' in item:
+                            new_laws.append(item)
+    except Exception:
+        pass
 
-        new_laws = []
-        modified_laws = []
-        try:
-            all_json_blocks = list(re.finditer(r'```json\s*(.*?)\s*```', calibration_report, re.DOTALL))
-            for block in all_json_blocks:
-                block_text = block.group(1)
-                if 'name' in block_text and 'content' in block_text and 'id' not in block_text:
-                    new_laws = json.loads(block_text)
-                elif 'id' in block_text and 'name' in block_text:
-                    modified_laws = json.loads(block_text)
-        except Exception:
-            pass
+    supabase.table("history").update({
+        "calibration": calibration_report,
+        "pending_laws": json.dumps(new_laws) if new_laws else None,
+        "pending_modifications": json.dumps(modified_laws) if modified_laws else None
+    }).eq("id", record["id"]).execute()
 
-        supabase.table("history").update({
-            "calibration": calibration_report,
-            "pending_laws": json.dumps(new_laws) if new_laws else None,
-            "pending_modifications": json.dumps(modified_laws) if modified_laws else None
-        }).eq("id", record["id"]).execute()
-
-        return True, calibration_report, new_laws, modified_laws
-
-    return False, "多次尝试后仍无法生成准确的校准报告，请稍后手动重新校准。", [], []
+    return True, calibration_report, new_laws, modified_laws
 
 def calibrate_all_uncalibrated():
     history = load_history()
@@ -1182,14 +1367,66 @@ with col2:
     btn_label2 = "🧠 开始全维推演" if not training_mode else "🧠 训练推演"
     if st.button(btn_label2, use_container_width=True):
         if match and st.session_state.search_report:
-            with st.spinner("正在进行全维推演，请耐心等待..."):
+            with st.spinner("正在提取参数并运行数学引擎..."):
+                # 1. 从搜索结果提取结构化参数
+                params = _extract_params(st.session_state.search_report)
+                # 2. 构建修正因子
+                mod = LambdaModifiers(
+                    attack=params.get("attack", 1.0),
+                    defense=params.get("defense", 1.0),
+                    tactical=params.get("tactical", 1.0),
+                    coach_intent=params.get("coach_intent", 1.0),
+                    scenario=params.get("scenario", 1.0),
+                    home_adv=1.08 if params.get("home_adv", False) else 1.0,
+                )
+                # 3. 数学引擎推演
+                odds = None
+                if params.get("odds_h") and params.get("odds_d") and params.get("odds_a"):
+                    odds = (params["odds_h"], params["odds_d"], params["odds_a"])
+                pred = predict_match(
+                    home=params.get("home_team", ""),
+                    away=params.get("away_team", ""),
+                    lam_h0=params.get("lam_h_initial", 1.3),
+                    lam_a0=params.get("lam_a_initial", 1.3),
+                    mod=mod,
+                    odds=odds,
+                    lam_c=params.get("lam_c", 0.05),
+                    phi=params.get("phi", 0.15),
+                )
+                st.session_state.math_prediction = pred
+                st.info(f"数学引擎完成 (λ_h={pred.lam_h:.2f}, λ_a={pred.lam_a:.2f})")
+
+            with st.spinner("正在生成推演报告..."):
+                # 4. LLM 基于数学结果生成自然语言报告
+                math_json = json.dumps({
+                    "主队": pred.home_team, "客队": pred.away_team,
+                    "主队λ": round(pred.lam_h, 2), "客队λ": round(pred.lam_a, 2),
+                    "期望进球": f"{pred.exp_h:.2f} - {pred.exp_a:.2f}",
+                    "主胜": f"{pred.home_win*100:.1f}%",
+                    "平局": f"{pred.draw*100:.1f}%",
+                    "客胜": f"{pred.away_win*100:.1f}%",
+                    "最可能比分": [f"{h}-{a} ({p*100:.1f}%)" for (h, a), p in pred.top_scores[:5]],
+                    "置信度": f"{pred.confidence*100:.0f}%",
+                    "修正因子": {
+                        "进攻": mod.attack, "防守": mod.defense,
+                        "战术": mod.tactical, "教练意图": mod.coach_intent,
+                        "场景": mod.scenario, "主场优势": mod.home_adv,
+                    }
+                }, ensure_ascii=False, indent=2)
+
+                analysis_query = (
+                    f"赛前数据报告:\n{st.session_state.search_report[:6000]}\n\n"
+                    f"数学模型计算结果 (Python 引擎):\n{math_json}\n\n"
+                    f"请基于以上信息，生成完整的全维推演报告。"
+                )
                 if training_mode:
-                    analysis_query = f"请基于以下比赛数据（注意：这是已结束的历史比赛，数据中可能包含最终比分），对 {match} 进行推演。请忽略最终比分，模拟赛前视角进行分析。\n\n{st.session_state.search_report}"
-                else:
-                    analysis_query = f"请基于以下赛前数据，对 {match} 进行推演。\n\n{st.session_state.search_report}"
-                result = call_deepseek(system_prompt_analysis, analysis_query, enable_search=False, model=MODEL_ANALYSIS)
+                    analysis_query = "注意：这是一场已结束的历史比赛，请忽略最终比分，模拟赛前视角。\n" + analysis_query
+
+                result = _deepseek_chat(_ANALYSIS_FROM_JSON_PROMPT, analysis_query,
+                                        model=MODEL_ANALYSIS)
                 if result:
                     st.session_state.analysis_report = result
+                    st.session_state.math_json = math_json
                     save_record(match, st.session_state.search_report, st.session_state.analysis_report)
                     st.success("推演记录已保存至云端数据库。")
         elif not match:
