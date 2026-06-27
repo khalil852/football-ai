@@ -389,25 +389,39 @@ def can_calibrate(match_time_str):
         return True, f"✅ 比赛已结束，可以校准。"
 
 # ============ 模型分配策略 ============
-# v4-flash: 低成本低延迟，用于数据整理/格式化任务
-# v4-pro:   深度推理，用于战术推演/分析任务
-MODEL_SEARCH = "deepseek-v4-flash"       # 搜索报告生成
-MODEL_ANALYSIS = "deepseek-v4-pro"       # 战术推演
-MODEL_CALIBRATE = "deepseek-v4-flash"    # 校准数据搜集 & 报告生成
+# deepseek-v4-flash: 低成本低延迟，数据整理/格式化
+# deepseek-v4-pro + reasoning_effort: 有 reasoning_effort 参数投那
+#   low/medium: 快速推理 | high: 平衡 | max: 极限推理（战术推演用）
+MODEL_SEARCH     = {"model": "deepseek-v4-flash"}
+MODEL_ANALYSIS   = {"model": "deepseek-v4-pro", "reasoning_effort": "max"}
+MODEL_CALIBRATE  = {"model": "deepseek-v4-flash"}
 
 
 def _deepseek_chat(system_prompt, user_content, model=None):
-    """调用 DeepSeek API，返回响应文本或空字符串"""
+    """调用 DeepSeek API，返回响应文本或空字符串。
+    model: {"model": "...", "reasoning_effort": "max"|"high"|"low"|None}
+    """
+    cfg = model or MODEL_SEARCH
+    payload = {
+        "model": cfg["model"],
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content}
+        ]
+    }
+    if "reasoning_effort" in cfg:
+        payload["reasoning_effort"] = cfg["reasoning_effort"]
+        if cfg["reasoning_effort"] == "max":
+            payload["max_tokens"] = 6000  # 推理 ~1000-2200t + 输出 ~500t
+        elif cfg["reasoning_effort"] == "high":
+            payload["max_tokens"] = 4096
+        else:
+            payload["max_tokens"] = 4096
+
     response = requests.post(
         url=URL,
         headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
-        json={
-            "model": model or MODEL_SEARCH,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content}
-            ]
-        },
+        json=payload,
         timeout=60
     )
     data = response.json()
