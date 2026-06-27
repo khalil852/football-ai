@@ -4,3 +4,16 @@ config_*.json
 users.json
 laws.json
 prompt_analysis.md
+API.env
+__pycache__/
+build/
+*.spec
+*.bat
+.claude/
+.deep-copilot/
+*_debug.html
+history_*.json
+test_pipeline.py
+test_supabase.py
+test_search_only.py
+test_connection.py

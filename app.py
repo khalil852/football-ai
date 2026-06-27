@@ -2,7 +2,6 @@ import streamlit as st
 import requests
 import json
 import os
-import sys
 import re
 import hashlib
 import random
@@ -10,10 +9,55 @@ import string
 from datetime import datetime, timedelta, timezone
 from supabase import create_client, Client
 
-# ============ Supabase 配置（三层安全读取） ============
-SUPABASE_URL = st.secrets.get("SUPABASE_URL", "YOUR_SUPABASE_URL_PLACEHOLDER")
-SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "YOUR_SUPABASE_KEY_PLACEHOLDER")
+# =============================================================================
+# 所有敏感配置均从 st.secrets 读取。
+# 本地开发：放在 .streamlit/secrets.toml（已在 .gitignore，不会上传 GitHub）
+# Streamlit Cloud：在 App Settings → Secrets 中配置 TOML 格式
+#
+# 需要在 secrets 中手动填写的字段：
+#   SUPABASE_URL          = "https://xxx.supabase.co"
+#   SUPABASE_KEY           = "sb_secret_xxx"          # service_role key
+#   default_deepseek_key   = "sk-xxx"                 # UP 主的共享 DeepSeek Key
+#   default_tavily_key     = "tvly-xxx"               # UP 主的共享 Tavily Key（可选）
+#   football_api_key       = "xxx"                    # API-Football Key（可选，rapidapi 免费）
+#   analysis_prompt        = '''多行文本'''            # 推演 AI 的 system prompt
+# =============================================================================
+
+def _secret(key, default=""):
+    """统一读取 st.secrets，不存在的 key 静默返回 default"""
+    try:
+        return st.secrets[key]
+    except (KeyError, FileNotFoundError):
+        return default
+
+SUPABASE_URL = _secret("SUPABASE_URL")
+SUPABASE_KEY = _secret("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+DEFAULT_DEEPSEEK_KEY = _secret("default_deepseek_key")
+TAVILY_API_KEY = _secret("default_tavily_key")
+FOOTBALL_API_KEY = _secret("football_api_key")
+
+FOOTBALL_URL = "https://v3.football.api-sports.io"
+FOOTBALL_HEADERS = {"x-apisports-key": FOOTBALL_API_KEY}
+TAVILY_URL = "https://api.tavily.com/search"
+
+# ============ System Prompts（优先 secrets，回退本地文件）============
+def _load_prompt(secret_name, filename):
+    val = _secret(secret_name)
+    if val:
+        return val
+    # 文件仅在本地开发或已上传 GitHub 时可用
+    path = os.path.join(os.path.dirname(__file__), filename)
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    # 兜底：硬编码的空 prompt，避免 crash
+    return f"# {secret_name} 未配置，请在 st.secrets 中设置"
+
+system_prompt_analysis = _load_prompt("analysis_prompt", "prompt_analysis.md")
+system_prompt_search = _load_prompt("search_prompt", "prompt_search.md")
+system_prompt_calibrate = _load_prompt("calibrate_prompt", "prompt_calibrate.md")
 
 # ============ 用户认证系统（URL参数持久化版本） ============
 def hash_password(password):
@@ -80,7 +124,6 @@ def logout():
     st.session_state.auth_token = ""
     st.session_state.user_id = None
     st.session_state.deepseek_key = ""
-    st.session_state.tavily_key = ""
     st.query_params.clear()
     st.rerun()
 
@@ -143,13 +186,12 @@ def load_api_keys(username):
     response = supabase.table("api_keys").select("*").eq("username", username).execute()
     if response.data:
         return response.data[0]
-    return {"deepseek_key": "", "tavily_key": ""}
+    return {"deepseek_key": ""}
 
-def save_api_keys(username, deepseek_key, tavily_key):
+def save_api_keys(username, deepseek_key):
     supabase.table("api_keys").upsert({
         "username": username,
-        "deepseek_key": deepseek_key,
-        "tavily_key": tavily_key
+        "deepseek_key": deepseek_key
     }, on_conflict="username").execute()
 
 api_keys = load_api_keys(st.session_state.username)
@@ -157,8 +199,6 @@ api_keys = load_api_keys(st.session_state.username)
 # ============ 初始化 session_state ============
 if "deepseek_key" not in st.session_state:
     st.session_state.deepseek_key = api_keys.get("deepseek_key", "")
-if "tavily_key" not in st.session_state:
-    st.session_state.tavily_key = api_keys.get("tavily_key", "")
 if "search_report" not in st.session_state:
     st.session_state.search_report = ""
 if "analysis_report" not in st.session_state:
@@ -181,17 +221,10 @@ with st.sidebar.expander("🔑 API Key 管理（可选）", expanded=True):
         value=st.session_state.deepseek_key,
         help="在 platform.deepseek.com 获取。留空则使用 UP 主的 Key。"
     )
-    tavily_key = st.text_input(
-        "你的 Tavily API Key（可选）",
-        type="password",
-        value=st.session_state.tavily_key,
-        help="可选。留空则使用系统默认的共享 Key。"
-    )
     if st.button("💾 保存我的 Key", use_container_width=True):
         if deepseek_key.strip():
             st.session_state.deepseek_key = deepseek_key.strip()
-            st.session_state.tavily_key = tavily_key.strip()
-            save_api_keys(st.session_state.username, deepseek_key.strip(), tavily_key.strip())
+            save_api_keys(st.session_state.username, deepseek_key.strip())
             st.success("你的 API Key 已保存！")
         else:
             st.warning("如果你不想用自己的 Key，请直接留空，系统会使用 UP 主的共享 Key。")
@@ -202,20 +235,9 @@ if st.session_state.deepseek_key:
 else:
     st.sidebar.info("ℹ️ 正在使用 UP 主的共享 API Key")
 
-# ============ 从 Secrets 读取默认 Key ============
-API_KEY = st.session_state.deepseek_key
-if not API_KEY:
-    try:
-        API_KEY = st.secrets["default_deepseek_key"]
-    except (KeyError, FileNotFoundError):
-        API_KEY = ""
-
-TAVILY_API_KEY = st.session_state.tavily_key
-if not TAVILY_API_KEY:
-    try:
-        TAVILY_API_KEY = st.secrets["default_tavily_key"]
-    except (KeyError, FileNotFoundError):
-        TAVILY_API_KEY = ""
+# 用户自定义 Key 优先，否则用 UP 主共享 Key
+API_KEY = st.session_state.deepseek_key or DEFAULT_DEEPSEEK_KEY
+URL = "https://api.deepseek.com/v1/chat/completions"
 
 # ============ 购买API Token入口（预留插槽） ============
 with st.sidebar.expander("💰 购买API Token", expanded=False):
@@ -226,25 +248,6 @@ with st.sidebar.expander("💰 购买API Token", expanded=False):
             st.markdown(f"[点击这里购买]({purchase_url})")
     else:
         st.info("📢 API Token 购买功能暂未开放。")
-
-# ============ API 配置 ============
-URL = "https://api.deepseek.com/v1/chat/completions"
-
-def resource_path(relative_path):
-    if hasattr(sys, '_MEIPASS'):
-        return os.path.join(sys._MEIPASS, relative_path)
-    return os.path.join(os.path.abspath("."), relative_path)
-
-try:
-    system_prompt_analysis = st.secrets["analysis_prompt"]
-except (KeyError, FileNotFoundError):
-    with open(resource_path("prompt_analysis.md"), "r", encoding="utf-8") as f:
-        system_prompt_analysis = f.read()
-
-with open(resource_path("prompt_search.md"), "r", encoding="utf-8") as f:
-    system_prompt_search = f.read()
-with open(resource_path("prompt_calibrate.md"), "r", encoding="utf-8") as f:
-    system_prompt_calibrate = f.read()
 
 # ============ 从 Supabase 加载定律库 ============
 def load_laws_from_supabase():
@@ -341,100 +344,399 @@ def can_calibrate(match_time_str):
     else:
         return True, f"✅ 比赛已结束，可以校准。"
 
-def call_deepseek(system_prompt, user_query, enable_search=False, search_mode="pre_match", summarize=True):
-    if not API_KEY:
-        st.error("API Key 未配置，请联系 UP 主。")
-        return ""
-
-    if not enable_search:
-        response = requests.post(
-            url=URL,
-            headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": "deepseek-v4-pro",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_query}
-                ]
-            }
-        )
-        data = response.json()
-        if 'error' in data:
-            st.error(f"API 错误：{data['error']}")
-            return ""
-        return data['choices'][0]['message'].get('content', '')
-
-    if not TAVILY_API_KEY:
-        st.error("未配置 Tavily API Key，无法联网搜索。")
-        return ""
-
-    all_search_results = ""
-    if search_mode == "pre_match":
-        search_rounds = [
-            f"{user_query} 首发阵容 伤病 历史交锋",
-            f"{user_query} 赔率 裁判 赛前新闻 教练发言",
-            f"{user_query} 出线形势 战术分析 关键球员"
-        ]
-    else:
-        search_rounds = [
-            f"{user_query} 最终比分 进球者 进球时间",
-            f"{user_query} 赛后技术统计 射门 控球率 角球",
-            f"{user_query} 赛后报告 比赛回顾 关键事件 红黄牌"
-        ]
-
-    for query in search_rounds:
-        try:
-            tavily_response = requests.post(
-                "https://api.tavily.com/search",
-                headers={"Content-Type": "application/json"},
-                json={
-                    "api_key": TAVILY_API_KEY,
-                    "query": query,
-                    "search_depth": "advanced",
-                    "max_results": 5
-                }
-            )
-            tavily_data = tavily_response.json()
-            for item in tavily_data.get("results", []):
-                content = item.get('content', '')
-                if len(content) > 30:
-                    all_search_results += f"- {item.get('title', '')}: {content}\n"
-        except Exception as e:
-            all_search_results += f"搜索失败：{str(e)}\n"
-
-    if not all_search_results:
-        return "搜索未返回有效结果，请稍后重试。"
-
-    if not summarize:
-        return all_search_results
-
-    new_user_message = f"""以下是针对你提出的问题进行的多轮深度搜索结果。请仔细阅读，并严格按照你的系统指令中的格式要求，生成一份完整的报告。
-
-搜索结果：
-{all_search_results}
-
-请注意：
-1. 对所有搜索结果进行综合分析，不要遗漏关键信息。
-2. 如果某项信息在搜索结果中确实不存在，请在报告中标注"暂无"。
-3. 在涉及到球员状态、战术分析等需要专业知识的部分，可以结合你自身的知识库进行补充。
-"""
-
-    response2 = requests.post(
+def _deepseek_chat(system_prompt, user_content):
+    """调用 DeepSeek API，返回响应文本或空字符串"""
+    response = requests.post(
         url=URL,
         headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
         json={
             "model": "deepseek-v4-pro",
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": new_user_message}
+                {"role": "user", "content": user_content}
             ]
-        }
+        },
+        timeout=60
     )
-    data2 = response2.json()
-    if 'error' in data2:
-        st.error(f"API 错误：{data2['error']}")
+    data = response.json()
+    if 'error' in data:
+        st.error(f"API 错误：{data['error']}")
         return ""
-    return data2['choices'][0]['message'].get('content', '')
+    return data['choices'][0]['message'].get('content', '')
+
+
+# ============ API-Football 数据获取 ============
+def _parse_teams(query):
+    """从查询中提取两个队名，返回 (team1, team2) 或 (None, None)"""
+    for sep in [r'\s+vs\s+', r'\s+v\s+', r'\s+对阵\s+', r'\s+对\s+']:
+        parts = re.split(sep, query, flags=re.IGNORECASE)
+        if len(parts) == 2:
+            # 取分隔符左边最后一个词（中文或英文词）
+            left_words = [w for w in parts[0].split() if re.search(r'[一-鿿]|[a-zA-Z]', w)]
+            righ_words = [w for w in parts[1].split() if re.search(r'[一-鿿]|[a-zA-Z]', w)]
+            if left_words and righ_words:
+                t1, t2 = left_words[-1], righ_words[0]
+                if t1 != t2:
+                    return t1, t2
+    return None, None
+
+
+# 中英文队名映射（API-Football 只能英文搜索）
+_TEAM_NAME_MAP = {
+    "法国": "France", "德国": "Germany", "巴西": "Brazil", "阿根廷": "Argentina",
+    "英格兰": "England", "西班牙": "Spain", "葡萄牙": "Portugal", "荷兰": "Netherlands",
+    "意大利": "Italy", "比利时": "Belgium", "克罗地亚": "Croatia", "乌拉圭": "Uruguay",
+    "塞内加尔": "Senegal", "摩洛哥": "Morocco", "日本": "Japan", "韩国": "South Korea",
+    "澳大利亚": "Australia", "伊朗": "Iran", "沙特": "Saudi Arabia", "卡塔尔": "Qatar",
+    "墨西哥": "Mexico", "美国": "USA", "加拿大": "Canada", "哥斯达黎加": "Costa Rica",
+    "加纳": "Ghana", "喀麦隆": "Cameroon", "尼日利亚": "Nigeria", "突尼斯": "Tunisia",
+    "埃及": "Egypt", "哥伦比亚": "Colombia", "智利": "Chile", "秘鲁": "Peru",
+    "巴拉圭": "Paraguay", "厄瓜多尔": "Ecuador", "丹麦": "Denmark", "瑞典": "Sweden",
+    "挪威": "Norway", "波兰": "Poland", "瑞士": "Switzerland", "奥地利": "Austria",
+    "塞尔维亚": "Serbia", "乌克兰": "Ukraine", "土耳其": "Turkey", "捷克": "Czech",
+    "俄罗斯": "Russia", "威尔士": "Wales", "苏格兰": "Scotland", "希腊": "Greece",
+    "科特迪瓦": "Ivory Coast", "海地": "Haiti", "巴拿马": "Panama", "牙买加": "Jamaica",
+}
+
+
+def _search_team(team_name):
+    """搜索球队 ID，返回 (team_id, team_name) 或 (None, None)。
+    先中→英映射，再尝试 API 搜索。"""
+    if not FOOTBALL_API_KEY:
+        return None, None
+    # 中→英
+    search_name = _TEAM_NAME_MAP.get(team_name, team_name)
+    try:
+        resp = requests.get(
+            f"{FOOTBALL_URL}/teams",
+            params={"search": search_name},
+            headers=FOOTBALL_HEADERS,
+            timeout=10
+        )
+        data = resp.json()
+        for t in data.get("response", []):
+            return t["team"]["id"], t["team"]["name"]
+        # 第一次搜不到，尝试 country 字段
+        resp2 = requests.get(
+            f"{FOOTBALL_URL}/teams",
+            params={"country": search_name},
+            headers=FOOTBALL_HEADERS,
+            timeout=10
+        )
+        for t in resp2.json().get("response", []):
+            return t["team"]["id"], t["team"]["name"]
+    except Exception:
+        pass
+    return None, None
+
+
+def _try_football_api(match_query, search_mode):
+    """从 API-Football 获取结构化数据，成功返回格式化文本，失败返回空字符串"""
+    if not FOOTBALL_API_KEY:
+        return ""
+
+    t1_name, t2_name = _parse_teams(match_query)
+    if not t1_name or not t2_name:
+        return ""
+
+    t1_id, t1_full = _search_team(t1_name)
+    t2_id, t2_full = _search_team(t2_name)
+    if not t1_id or not t2_id:
+        return ""
+
+    try:
+        # 找到本场 fixture
+        resp = requests.get(
+            f"{FOOTBALL_URL}/fixtures",
+            params={"team": t1_id, "season": 2026},
+            headers=FOOTBALL_HEADERS,
+            timeout=10
+        )
+        data = resp.json()
+        fixture = None
+        for f in data.get("response", []):
+            h_id = f["teams"]["home"]["id"]
+            a_id = f["teams"]["away"]["id"]
+            if (h_id == t1_id and a_id == t2_id) or (h_id == t2_id and a_id == t1_id):
+                fixture = f
+                break
+
+        if not fixture:
+            return ""
+
+        fx = fixture["fixture"]
+        teams = fixture["teams"]
+        league = fixture["league"]
+        lines = []
+
+        # 基本信息
+        lines.append(f"赛事: {league.get('name', '未知')} | {league.get('round', '')}")
+        lines.append(f"对阵: {teams['home']['name']} vs {teams['away']['name']}")
+        kickoff = fx.get("date", "")
+        if kickoff:
+            lines.append(f"开赛时间: {kickoff.replace('T', ' ').replace('+00:00', '')}")
+        venue = fixture.get("fixture", {}).get("venue", {})
+        if venue.get("name"):
+            lines.append(f"场地: {venue.get('name', '')}, {venue.get('city', '')}")
+
+        # 赔率
+        odds_resp = requests.get(
+            f"{FOOTBALL_URL}/odds",
+            params={"fixture": fx["id"]},
+            headers=FOOTBALL_HEADERS,
+            timeout=10
+        )
+        odds_data = odds_resp.json()
+        for book in odds_data.get("response", [])[:2]:
+            for b in book.get("bookmakers", [])[:2]:
+                lines.append(f"赔率 ({b['name']}):")
+                for bet in b.get("bets", [])[:3]:
+                    vals = " / ".join(
+                        f"{v['value']}({v['odd']})" for v in bet.get("values", [])[:3]
+                    )
+                    lines.append(f"  {bet['name']}: {vals}")
+
+        # 阵容
+        lineup_resp = requests.get(
+            f"{FOOTBALL_URL}/fixtures/lineups",
+            params={"fixture": fx["id"]},
+            headers=FOOTBALL_HEADERS,
+            timeout=10
+        )
+        for lu in lineup_resp.json().get("response", []):
+            side = lu.get("team", {}).get("name", "")
+            formation = lu.get("formation", "")
+            lines.append(f"\n{side} 阵型 {formation}:")
+            for p in lu.get("startXI", [])[:11]:
+                name = p.get("player", {}).get("name", "")
+                number = p.get("player", {}).get("number", "")
+                pos = p.get("player", {}).get("pos", "")
+                lines.append(f"  {number} {name} ({pos})")
+            subs = [p.get("player", {}).get("name", "") for p in lu.get("substitutes", [])[:7]]
+            if subs:
+                lines.append(f"  替补: {', '.join(subs)}")
+
+        # 伤病
+        for tid, tname in [(t1_id, t1_full), (t2_id, t2_full)]:
+            inj_resp = requests.get(
+                f"{FOOTBALL_URL}/injuries",
+                params={"team": tid, "season": 2026},
+                headers=FOOTBALL_HEADERS,
+                timeout=10
+            )
+            injuries = inj_resp.json().get("response", [])
+            if injuries:
+                lines.append(f"\n{tname or tid} 伤病:")
+                for inj in injuries[:8]:
+                    p = inj.get("player", {})
+                    lines.append(
+                        f"  {p.get('name', '')} — {inj.get('fixture', {}).get('reason', '未知')}"
+                    )
+
+        # 历史交锋
+        h2h_resp = requests.get(
+            f"{FOOTBALL_URL}/fixtures/headtohead",
+            params={"h2h": f"{t1_id}-{t2_id}"},
+            headers=FOOTBALL_HEADERS,
+            timeout=10
+        )
+        h2h_list = h2h_resp.json().get("response", [])[:5]
+        if h2h_list:
+            lines.append("\n历史交锋:")
+            for h in h2h_list:
+                ht = h["teams"]["home"]["name"]
+                at = h["teams"]["away"]["name"]
+                hg = h["goals"]["home"]
+                ag = h["goals"]["away"]
+                d = h["fixture"]["date"][:10]
+                lines.append(f"  {d} {ht} {hg}-{ag} {at}")
+
+        # 积分榜
+        standings_resp = requests.get(
+            f"{FOOTBALL_URL}/standings",
+            params={"league": league.get("id"), "season": 2026},
+            headers=FOOTBALL_HEADERS,
+            timeout=10
+        )
+        for grp in standings_resp.json().get("response", [{}])[0].get("league", {}).get("standings", []):
+            for row in grp:
+                if row.get("team", {}).get("id") in (t1_id, t2_id):
+                    lines.append(
+                        f"  积分榜 {row['team']['name']}: "
+                        f"排名{row.get('rank','?')} | "
+                        f"赛{row.get('all',{}).get('played','?')} "
+                        f"胜{row.get('all',{}).get('win','?')} "
+                        f"平{row.get('all',{}).get('draw','?')} "
+                        f"负{row.get('all',{}).get('lose','?')} | "
+                        f"进球{row.get('all',{}).get('goals',{}).get('for','?')} "
+                        f"失球{row.get('all',{}).get('goals',{}).get('against','?')} "
+                    )
+
+        # 赛后数据
+        if search_mode == "post_match":
+            events_resp = requests.get(
+                f"{FOOTBALL_URL}/fixtures/events",
+                params={"fixture": fx["id"]},
+                headers=FOOTBALL_HEADERS,
+                timeout=10
+            )
+            events = events_resp.json().get("response", [])
+            if events:
+                lines.append(f"\n比赛事件:")
+                for ev in events:
+                    t = ev.get("time", {}).get("elapsed", "?")
+                    p = ev.get("player", {}).get("name", "")
+                    tp = ev.get("type", "")
+                    detail = ev.get("detail", "")
+                    side = ev.get("team", {}).get("name", "")
+                    extra = ev.get("comments", "") or ""
+                    match tp:
+                        case "Goal":
+                            lines.append(f"  {t}' ⚽ {p} ({side}) — {detail} {extra}")
+                        case "Card":
+                            lines.append(f"  {t}' 🟨 {p} ({side}) — {detail}")
+                        case "subst":
+                            a = ev.get("assist", {}).get("name", "")
+                            lines.append(f"  {t}' 🔄 {a} → {p} ({side})")
+
+            stats_resp = requests.get(
+                f"{FOOTBALL_URL}/fixtures/statistics",
+                params={"fixture": fx["id"]},
+                headers=FOOTBALL_HEADERS,
+                timeout=10
+            )
+            for team_stats in stats_resp.json().get("response", []):
+                tname = team_stats.get("team", {}).get("name", "")
+                lines.append(f"\n{tname} 技术统计:")
+                for s in team_stats.get("statistics", []):
+                    v = s.get("value", "")
+                    if v is not None:
+                        lines.append(f"  {s.get('type','')}: {v}")
+
+        lines.insert(0, "[数据来源: API-Football]")
+        return "\n".join(lines)
+
+    except Exception:
+        return ""
+
+
+# ============ Tavily 搜索（回退方案）============
+def _tavily_search(query):
+    """Tavily 搜索，返回格式化结果"""
+    try:
+        resp = requests.post(
+            TAVILY_URL,
+            headers={"Content-Type": "application/json"},
+            json={
+                "api_key": TAVILY_API_KEY,
+                "query": query,
+                "search_depth": "basic",
+                "max_results": 5
+            },
+            timeout=15
+        )
+        data = resp.json()
+        results = []
+        for item in data.get("results", []):
+            content = item.get("content", "")
+            if len(content) > 20:
+                results.append(f"- {item.get('title', '')}: {content}")
+        return "\n".join(results) if results else "搜索未返回有效结果。"
+    except Exception as e:
+        return f"搜索失败：{str(e)}"
+
+
+def _search_with_tavily(system_prompt, user_query):
+    """通过 web_search tool + Tavily 让 DeepSeek 自主搜索并生成报告"""
+    if not TAVILY_API_KEY:
+        return ""
+
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "实时互联网搜索，获取最新新闻、数据、资讯",
+            "parameters": {
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {"type": "string", "description": "搜索关键词"}
+                }
+            }
+        }
+    }]
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_query}
+    ]
+
+    for _ in range(2):
+        response = requests.post(
+            url=URL,
+            headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": "deepseek-v4-pro",
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": "auto"
+            },
+            timeout=60
+        )
+        data = response.json()
+        if "error" in data:
+            st.error(f"API 错误：{data['error']}")
+            return ""
+
+        msg = data["choices"][0]["message"]
+        if not msg.get("tool_calls"):
+            return msg.get("content", "")
+
+        messages.append(msg)
+        for call in msg["tool_calls"]:
+            if call["function"]["name"] == "web_search":
+                q = json.loads(call["function"]["arguments"])["query"]
+                results = _tavily_search(q)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "content": results
+                })
+
+    return _deepseek_chat(system_prompt, "请基于以上搜索结果，生成完整报告。")
+
+
+# ============ 统一搜索入口 ============
+def call_deepseek(system_prompt, user_query, enable_search=False, search_mode="pre_match"):
+    """调用 DeepSeek API。
+    enable_search=True 时：API-Football → Tavily 二级回退。
+    search_mode: "pre_match" 或 "post_match"
+    """
+    if not API_KEY:
+        st.error("API Key 未配置，请联系 UP 主。")
+        return ""
+
+    if not enable_search:
+        return _deepseek_chat(system_prompt, user_query)
+
+    # Tier 1: API-Football
+    football_data = _try_football_api(user_query, search_mode)
+    if football_data:
+        return _deepseek_chat(
+            system_prompt,
+            f"{user_query}\n\n[实时数据]\n{football_data}"
+        )
+
+    # Tier 2: Tavily
+    result = _search_with_tavily(system_prompt, user_query)
+    if result:
+        return result
+
+    # Tier 3: 纯模型知识
+    return _deepseek_chat(
+        system_prompt,
+        "[数据源均不可用] 请利用你的训练数据回答以下问题。不确定处标注\"基于历史数据推测\"。\n\n" + user_query
+    )
 
 # ============ 历史记录管理 ============
 def save_record(match, search_report, analysis_report):
@@ -466,7 +768,7 @@ def calibrate_record(record, max_attempts=3):
         search_query = f"请联网搜索 {record['match']} 的赛后完整数据（比分、进球、技术统计、关键事件等）。"
         post_match_data = call_deepseek(
             system_prompt_calibrate, search_query,
-            enable_search=True, search_mode="post_match", summarize=False
+            enable_search=True, search_mode="post_match"
         )
 
         if any(kw in post_match_data for kw in [
@@ -479,7 +781,7 @@ def calibrate_record(record, max_attempts=3):
         verify_query = f"{record['match']} 最终比分 准确结果 技术统计"
         verify_data = call_deepseek(
             system_prompt_calibrate, verify_query,
-            enable_search=True, search_mode="post_match", summarize=False
+            enable_search=True, search_mode="post_match"
         )
         score_pattern = re.findall(r'(\d+)\s*[-:]\s*(\d+)', verify_data + post_match_data)
 
@@ -737,7 +1039,7 @@ with col1:
         if match:
             with st.spinner("正在搜索并汇总赛前数据，请耐心等待..."):
                 search_query = f"请为 {match} 搜集赛前关键信息，并严格按照模板格式输出。"
-                result = call_deepseek(system_prompt_search, search_query, enable_search=True)
+                result = call_deepseek(system_prompt_search, search_query, enable_search=True, search_mode="pre_match")
                 if result:
                     st.session_state.search_report = result
                     st.session_state.current_match = match
