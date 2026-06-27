@@ -562,31 +562,117 @@ def calibrate_math(pred: MatchPrediction, actual_h: int, actual_a: int) -> Calib
                              goal_deviation=round(deviation, 2))
 
 
-# ---- 从搜索报告提取结构化参数 ----
+# ---- 定律库驱动的参数提取 ----
+_LAW_WEIGHT_PROMPT = """你是一个足球量化分析师。你的任务是将"全维推演定律库"应用到一场具体比赛中，输出精确的数值修正因子。
+
+## 工作流程
+1. 阅读赛前数据报告，理解比赛背景
+2. 逐条阅读定律库中的定律
+3. 判断该定律的 trigger（触发条件）是否被本场比赛满足
+4. 如果满足，根据具体情境计算精确的乘性修正权重（不使用区间，取精确值）
+5. 合并所有触发的定律，输出最终的修正因子
+
+## 权重取值指南
+- 1.00 = 无影响
+- 0.70-0.85 = 严重削弱（金球级核心缺阵、战术完克）
+- 0.86-0.95 = 轻微削弱（轮换球员缺阵、小伤病）
+- 1.05-1.15 = 轻微增强（核心复出、主场气势）
+- 1.16-1.30 = 显著增强（超级球星回归、对手防线崩溃）
+
+### 关键原则
+- 同一维度多条定律触发时，因子相乘（不是相加）
+- 根据具体情境取精确值。比如"进攻λ -0.3 至 -0.5"：
+  - 如果缺阵的是金球前三+队史射手王+无替代者 → attack = 0.75
+  - 如果缺阵的是普通轮换前锋+有合格替补 → attack = 0.92
+- λ_effect 中的加法修正需转为乘性：factor = (λ + delta) / λ
+  例：λ=1.5, delta=-0.4 → factor = 1.1/1.5 = 0.73
+
+## 输出
+仅输出一个 JSON 对象，不要任何解释文字:
+{
+  "triggered_laws": ["触发的定律名称1", "触发的定律名称2"],
+  "home_team": "主队名",
+  "away_team": "客队名",
+  "lam_h_initial": 1.5,
+  "lam_a_initial": 1.3,
+  "attack": 0.85,
+  "defense": 1.0,
+  "tactical": 1.05,
+  "coach_intent": 1.15,
+  "scenario": 1.0,
+  "phi": 0.15,
+  "lam_c": 0.05,
+  "home_adv": true,
+  "odds_h": 1.65,
+  "odds_d": 3.80,
+  "odds_a": 5.50,
+  "reasoning": "一句话总结哪些定律被触发以及最关键的一条定律"
+}
+"""
+
+
+def _laws_to_modifiers(search_report: str, laws: list) -> dict:
+    """将定律库应用到具体比赛，输出精确乘性修正因子。
+    若 LLM 调用失败，回退为基础提取模式。"""
+    if not search_report:
+        return {}
+
+    # 只保留 active 定律，转 JSON
+    active_laws = [l for l in laws if l.get("status", "active") == "active"]
+    if not active_laws:
+        active_laws = laws  # 兜底：所有定律都视为 active
+
+    laws_json = json.dumps(active_laws, ensure_ascii=False, indent=2)
+
+    try:
+        resp = requests.post(
+            url=URL,
+            headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": "deepseek-v4-flash",
+                "messages": [
+                    {"role": "system", "content": _LAW_WEIGHT_PROMPT},
+                    {"role": "user",
+                     "content": f"## 赛前数据报告\n{search_report[:6000]}\n\n## 定律库\n{laws_json}"}
+                ],
+                "max_tokens": 1200,
+                "temperature": 0.0
+            },
+            timeout=30
+        )
+        data = resp.json()
+        if "error" in data:
+            return {}
+        content = data["choices"][0]["message"].get("content", "")
+        m = re.search(r'\{[\s\S]*\}', content)
+        if m:
+            result = json.loads(m.group())
+            # 展示触发的定律
+            triggered = result.pop("triggered_laws", [])
+            reasoning = result.pop("reasoning", "")
+            if triggered:
+                st.info(f"📋 触发的定律: {', '.join(triggered[:5])}")
+            return result
+    except Exception:
+        pass
+    return {}
+
+
+# ---- 回退模式 prompt（定律库加载失败时使用）----
 _PARAM_EXTRACT_PROMPT = (
-    "你是一个数据提取器。从以下赛前数据报告中提取结构化参数，"
-    "仅输出 JSON，不要任何解释文字。\n\n"
-    "JSON 字段:\n"
-    '- home_team: 主队名\n'
-    '- away_team: 客队名\n'
-    '- lam_h_initial: 主队近5场场均进球数 (通常 0.5-3.0)\n'
-    '- lam_a_initial: 客队近5场场均进球数 (通常 0.5-3.0)\n'
-    '- attack: 进攻修正因子 (0.7-1.3), 核心缺阵=0.80-0.90, 核心复出=1.10-1.20\n'
-    '- defense: 防守修正因子 (0.7-1.3), 核心后卫缺阵=0.85, 门将顶级=1.10\n'
-    '- tactical: 战术克制因子 (0.85-1.15)\n'
-    '- coach_intent: 教练意图 L1=0.85 L2=0.92 L3=1.0 L4=1.08 L5=1.15\n'
-    '- scenario: 场景因子, 生死战=1.10 高原=0.90 加时=0.80 中立=1.0\n'
-    '- home_adv: true=主队主场 false=中立/客场\n'
-    '- phi: 过度离散 (通常 0.10-0.25), 强弱悬殊=0.20+\n'
-    '- lam_c: 关联项 (通常 0.02-0.10)\n'
-    '- odds_h, odds_d, odds_a: 赔率 (若无标注 null)\n'
-    '- predicted_h, predicted_a: 报告中推演的比分 (若未推演标注 0,0)\n'
-    '- actual_h, actual_a: 报告中提到的实际比分 (若未提及标注 null)\n'
-    '- has_actual_result: true=报告含实际比分\n'
+    "你是一个数据提取器。从以下赛前数据报告中提取结构化参数，仅输出 JSON。\n"
+    "字段: home_team, away_team, lam_h_initial, lam_a_initial, "
+    "attack, defense, tactical, coach_intent, scenario, phi, lam_c, "
+    "home_adv, odds_h, odds_d, odds_a"
 )
 
-def _extract_params(search_report: str) -> dict:
-    """从搜索报告提取结构化参数，失败返回空 dict"""
+def _extract_params(search_report: str, laws: list = None) -> dict:
+    """从搜索报告提取结构化参数 — 优先使用定律驱动模式"""
+    if laws and len(laws) > 0:
+        result = _laws_to_modifiers(search_report, laws)
+        if result and "home_team" in result:
+            return result
+    # 回退：纯 AI 猜测
     try:
         resp = requests.post(
             url=URL,
@@ -1369,7 +1455,8 @@ with col2:
         if match and st.session_state.search_report:
             with st.spinner("正在提取参数并运行数学引擎..."):
                 # 1. 从搜索结果提取结构化参数
-                params = _extract_params(st.session_state.search_report)
+                params = _extract_params(st.session_state.search_report,
+                                         laws_data.get("laws", []))
                 # 2. 构建修正因子
                 mod = LambdaModifiers(
                     attack=params.get("attack", 1.0),
