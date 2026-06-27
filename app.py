@@ -462,8 +462,8 @@ def can_calibrate(match_time_str):
 MODEL_SEARCH     = {"model": "deepseek-chat"}
 MODEL_ANALYSIS   = {"model": "deepseek-v4-pro", "reasoning_effort": "max"}
 MODEL_CALIBRATE  = {"model": "deepseek-chat"}
-MODEL_LAW_PARAMS = {"model": "deepseek-chat"}       # _laws_to_modifiers 专用
-MODEL_EXTRACT    = {"model": "deepseek-chat"}       # _extract_params 回退专用
+MODEL_LAW_PARAMS = {"model": "deepseek-v4-pro"}    # _laws_to_modifiers — 多任务推理需 pro 级别
+MODEL_EXTRACT    = {"model": "deepseek-chat"}       # _extract_params 回退 — 简单提取
 
 
 def _deepseek_chat(system_prompt, user_content, model=None):
@@ -724,7 +724,7 @@ def _laws_to_modifiers(search_report: str, laws: list) -> dict:
     laws_json = json.dumps(law_summaries, ensure_ascii=False, indent=2)
 
     try:
-        payload = {"max_tokens": 800 if all_have_map else 1200, "temperature": 0.0}
+        payload = {"max_tokens": 2000 if all_have_map else 3000, "temperature": 0.0}
         payload.update(MODEL_LAW_PARAMS)
         payload.update({
             "messages": [
@@ -737,7 +737,7 @@ def _laws_to_modifiers(search_report: str, laws: list) -> dict:
             url=URL,
             headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
             json=payload,
-            timeout=30
+            timeout=45
         )
         data = resp.json()
         if "error" in data:
