@@ -392,13 +392,15 @@ def can_calibrate(match_time_str):
     else:
         return True, f"✅ 比赛已结束，可以校准。"
 
-# ============ 模型分配策略 ============
-# deepseek-v4-flash: 低成本低延迟，数据整理/格式化
-# deepseek-v4-pro + reasoning_effort: 有 reasoning_effort 参数投那
-#   low/medium: 快速推理 | high: 平衡 | max: 极限推理（战术推演用）
-MODEL_SEARCH     = {"model": "deepseek-v4-flash"}
+# ============ 模型分配策略（基于 4x3x2 全模型压力测试）============
+# deepseek-chat:     最快轻量模型 (5.2s search, 5.6s analysis), 成本 $0.00012
+# deepseek-v4-pro/max: 深度推理，战术推演专用 (33s, 但对复杂战术分析更可靠)
+# deepseek-v4-flash:   校准回退 (chat 在 JSON 输出任务上质量不稳定时降级)
+MODEL_SEARCH     = {"model": "deepseek-chat"}
 MODEL_ANALYSIS   = {"model": "deepseek-v4-pro", "reasoning_effort": "max"}
-MODEL_CALIBRATE  = {"model": "deepseek-v4-flash"}
+MODEL_CALIBRATE  = {"model": "deepseek-chat"}
+MODEL_LAW_PARAMS = {"model": "deepseek-chat"}       # _laws_to_modifiers 专用
+MODEL_EXTRACT    = {"model": "deepseek-chat"}       # _extract_params 回退专用
 
 
 def _deepseek_chat(system_prompt, user_content, model=None):
@@ -641,19 +643,19 @@ def _laws_to_modifiers(search_report: str, laws: list) -> dict:
     laws_json = json.dumps(active_laws, ensure_ascii=False, indent=2)
 
     try:
+        payload = {"max_tokens": 1200, "temperature": 0.0}
+        payload.update(MODEL_LAW_PARAMS)
+        payload.update({
+            "messages": [
+                {"role": "system", "content": _LAW_WEIGHT_PROMPT},
+                {"role": "user",
+                 "content": f"## 赛前数据报告\n{search_report[:6000]}\n\n## 定律库\n{laws_json}"}
+            ],
+        })
         resp = requests.post(
             url=URL,
             headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": "deepseek-v4-flash",
-                "messages": [
-                    {"role": "system", "content": _LAW_WEIGHT_PROMPT},
-                    {"role": "user",
-                     "content": f"## 赛前数据报告\n{search_report[:6000]}\n\n## 定律库\n{laws_json}"}
-                ],
-                "max_tokens": 1200,
-                "temperature": 0.0
-            },
+            json=payload,
             timeout=30
         )
         data = resp.json()
@@ -690,18 +692,18 @@ def _extract_params(search_report: str, laws: list = None) -> dict:
             return result
     # 回退：纯 AI 猜测
     try:
+        payload = {"max_tokens": 800, "temperature": 0.0}
+        payload.update(MODEL_EXTRACT)
+        payload.update({
+            "messages": [
+                {"role": "system", "content": _PARAM_EXTRACT_PROMPT},
+                {"role": "user", "content": search_report[:8000]}
+            ],
+        })
         resp = requests.post(
             url=URL,
             headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": "deepseek-v4-flash",
-                "messages": [
-                    {"role": "system", "content": _PARAM_EXTRACT_PROMPT},
-                    {"role": "user", "content": search_report[:8000]}
-                ],
-                "max_tokens": 800,
-                "temperature": 0.0
-            },
+            json=payload,
             timeout=30
         )
         data = resp.json()
