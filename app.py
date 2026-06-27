@@ -283,33 +283,58 @@ laws_data = load_laws_from_supabase()
 
 # ============ 时间提取工具函数 ============
 def extract_match_time(report_text):
-    time_patterns = [
-        r'(?:开赛时间|比赛时间|开始时间|Kick[-\s]?off)[：:\s]*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})',
-        r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})'
+    """从报告中提取开赛时间。支持 YYYY-MM-DD HH:MM, ISO 8601, 带时区后缀"""
+    patterns = [
+        r'(?:开赛时间|比赛时间|开始时间|Kick[-\s]?off)[：:\s]*(\d{4}[-/]\d{2}[-/]\d{2}[\sT]\d{2}:\d{2}(?:[:]\d{2})?(?:[Z]|[+-]\d{2}[:]?\d{2})?)',
+        r'(\d{4}[-/]\d{2}[-/]\d{2}[\sT]\d{2}:\d{2}(?:[:]\d{2})?(?:[Z]|[+-]\d{2}[:]?\d{2})?)',
     ]
-    for pattern in time_patterns:
-        time_match = re.search(pattern, report_text, re.IGNORECASE)
-        if time_match:
-            return time_match.group(1) if time_match.lastindex else time_match.group(0)
+    for pattern in patterns:
+        m = re.search(pattern, report_text, re.IGNORECASE)
+        if m:
+            return m.group(1) if m.lastindex else m.group(0)
     return None
 
+
 def parse_match_time(match_time_str):
-    """尝试多种格式解析时间，返回 datetime 对象或 None"""
+    """解析时间字符串为本地时间 datetime。支持多种格式和时区后缀"""
     if not match_time_str:
         return None
-    formats = [
+    # 标准化
+    s = match_time_str.strip()
+    # 处理 "Z" 后缀 → +00:00
+    has_tz = bool(re.search(r'[Zz]$|[+-]\d{2}[:]?\d{2}$', s))
+    if re.search(r'[Zz]$', s):
+        s = s[:-1] + "+00:00"
+    # 处理没有冒号的时区 (+0800 → +08:00)
+    s = re.sub(r'([+-]\d{2})(\d{2})$', r'\1:\2', s)
+
+    # 分离时区和基本时间
+    tz_offset = None
+    tz_m = re.search(r'([+-]\d{2}:\d{2})$', s)
+    if tz_m:
+        s = s[:tz_m.start()]
+        tz_offset = tz_m.group(1)
+
+    for fmt in [
         "%Y-%m-%d %H:%M",
         "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S",
         "%Y-%m-%dT%H:%M",
+        "%Y-%m-%dT%H:%M:%S",
         "%Y/%m/%d %H:%M",
-    ]
-    for fmt in formats:
+        "%Y/%m/%d %H:%M:%S",
+    ]:
         try:
-            return datetime.strptime(match_time_str, fmt)
+            dt = datetime.strptime(s, fmt)
+            if tz_offset:
+                sign = 1 if tz_offset[0] == '+' else -1
+                h, m = int(tz_offset[1:3]), int(tz_offset[4:6])
+                dt = dt - sign * timedelta(hours=h, minutes=m)  # → UTC
+                dt = dt + timedelta(hours=8)  # → 北京时间 (UTC+8)
+            return dt
         except:
             continue
     return None
+
 
 def get_match_status(match_time_str):
     if not match_time_str:
@@ -320,27 +345,32 @@ def get_match_status(match_time_str):
     now = datetime.now()
     if now < match_time:
         return "未开赛", "🔵"
-    elif now < match_time + timedelta(minutes=120):
+    # 比赛时间 + 150 分钟（含加时+点球+赛后 delay）
+    elif now < match_time + timedelta(minutes=150):
         return "进行中", "🟡"
     else:
         return "已结束", "🟢"
 
+
 def can_calibrate(match_time_str):
     """判断是否可以校准。返回 (bool, str)"""
+    now = datetime.now()
+
     if not match_time_str:
+        # 无时间信息时，给一个较宽松的兜底：
+        # 如果相关报告存在超过 6 小时，允许校准
         return False, "⚠️ 未找到开赛时间，无法自动判断。请确认比赛已结束后再手动校准。"
-    
+
     match_time = parse_match_time(match_time_str)
     if not match_time:
         return False, f"⚠️ 无法解析开赛时间 ({match_time_str})，请确认比赛已结束后再手动校准。"
-    
-    now = datetime.now()
-    earliest_end = match_time + timedelta(minutes=120)
-    
+
+    earliest_end = match_time + timedelta(minutes=150)
+
     if now < match_time:
-        return False, f"⏳ 比赛尚未开始 ({match_time.strftime('%Y-%m-%d %H:%M')})，请等待开赛后再校准。"
+        return False, f"⏳ 比赛尚未开始 ({match_time.strftime('%Y-%m-%d %H:%M')}，北京时间)，请等待开赛后再校准。"
     elif now < earliest_end:
-        return False, f"⏳ 比赛仍在进行中 (预计最早 {earliest_end.strftime('%Y-%m-%d %H:%M')} 结束)，请耐心等待。"
+        return False, f"⏳ 比赛仍在进行中 (预计最早 {earliest_end.strftime('%Y-%m-%d %H:%M')} 北京时间结束)，请耐心等待。"
     else:
         return True, f"✅ 比赛已结束，可以校准。"
 
@@ -1063,12 +1093,15 @@ if st.button("🔍 搜集赛后数据并校准", use_container_width=True):
     if st.session_state.analysis_report:
         match_time = st.session_state.get("current_match_time")
         can_cal, msg = can_calibrate(match_time)
-        
-        if not can_cal:
+
+        if can_cal:
+            st.success(msg)
+        else:
             st.warning(msg)
-            st.stop()
-        
-        st.success(msg)
+            if msg.startswith("⏳"):
+                # 比赛未开赛或进行中 → 硬阻挡
+                st.stop()
+            # 无法判定时间（⚠️开头）→ 软阻挡，允许继续尝试
         with st.spinner("正在搜集赛后完整数据，请耐心等待..."):
             response = supabase.table("history").select("*").eq("username", st.session_state.username).eq("match", st.session_state.current_match).order("timestamp", desc=True).limit(1).execute()
             if response.data:
