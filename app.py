@@ -555,7 +555,7 @@ class MatchPrediction:
     away_team: str = ""
     lam_h: float = 0.0
     lam_a: float = 0.0
-    lam_c: float = 0.05
+    lam_c: float = 0.02
     phi: float = 0.15
     home_win: float = 0.0
     draw: float = 0.0
@@ -610,10 +610,24 @@ def _implied_probs(odds_h: float, odds_d: float, odds_a: float) -> Tuple[float, 
 # ---- 核心推演 ----
 def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
                   mod: LambdaModifiers, odds: Tuple[float, float, float] = None,
-                  lam_c: float = 0.05, phi: float = 0.15, max_g: int = 6) -> MatchPrediction:
+                  lam_c: float = 0.02, phi: float = 0.15, max_g: int = 8) -> MatchPrediction:
     lh = mod.apply(lam_h0, is_home=True)
     la = mod.apply(lam_a0, is_home=False)
     probs = _bivariate_poisson(lh, la, lam_c, max_g)
+
+    # 过度离散修正：负二项 vs 泊松的边际比率调整联合概率
+    if phi > 0.01:
+        adj = {}
+        total = 0.0
+        for (h, a), p in probs.items():
+            nb_h = max(1e-10, _neg_binom_p(lh, h, phi))
+            nb_a = max(1e-10, _neg_binom_p(la, a, phi))
+            po_h = max(1e-10, math.exp(-lh) * lh**h / math.factorial(h))
+            po_a = max(1e-10, math.exp(-la) * la**a / math.factorial(a))
+            adj[(h, a)] = p * (nb_h / po_h) ** 0.5 * (nb_a / po_a) ** 0.5
+            total += adj[(h, a)]
+        if total > 0:
+            probs = {k: v / total for k, v in adj.items()}
 
     hw = dw = aw = eh = ea = 0.0
     for (h, a), p in probs.items():
@@ -655,7 +669,7 @@ _LAW_WEIGHT_MAP_PROMPT = (
     "如果匹配，直接使用定律自带的 modifier_map 值，不要修改。\n"
     "输出 JSON: {\"merged_modifiers\": {\"attack\": 0.85, ...}, "
     "\"lam_h_initial\": 1.5, \"lam_a_initial\": 1.3, "
-    "\"phi\": 0.15, \"lam_c\": 0.05, \"home_adv\": true, "
+    "\"phi\": 0.15, \"lam_c\": 0.02, \"home_adv\": true, "
     "\"odds_h\": null, \"odds_d\": null, \"odds_a\": null, "
     "\"triggered\": [\"匹配的定律名1\"], \"summary\": \"一句话\"}\n"
     "仅输出 JSON，不要解释。"
@@ -669,7 +683,7 @@ _LAW_WEIGHT_PROMPT_FALLBACK = (
     "权重参考：0.70-0.85 严重削弱 | 0.86-0.95 轻微削弱 | 1.0 无影响 | 1.05-1.15 轻微增强。\n"
     "输出 JSON: {\"merged_modifiers\": {\"attack\": 0.85, ...}, "
     "\"lam_h_initial\": 1.5, \"lam_a_initial\": 1.3, "
-    "\"phi\": 0.15, \"lam_c\": 0.05, \"home_adv\": true, "
+    "\"phi\": 0.15, \"lam_c\": 0.02, \"home_adv\": true, "
     "\"odds_h\": null, \"odds_d\": null, \"odds_a\": null}\n"
     "仅输出 JSON，不要解释。"
 )
@@ -1507,7 +1521,7 @@ with col2:
                     lam_a0=_f("lam_a_initial", 1.3),
                     mod=mod,
                     odds=odds,
-                    lam_c=_f("lam_c", 0.05),
+                    lam_c=_f("lam_c", 0.02),
                     phi=_f("phi", 0.15),
                 )
                 st.session_state.math_prediction = pred
