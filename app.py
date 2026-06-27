@@ -1449,7 +1449,7 @@ with col1:
         if match:
             with st.spinner("正在搜索并汇总数据，请耐心等待..."):
                 if training_mode:
-                    search_query = f"请为 {match} 搜集比赛的完整信息（包括最终比分、进球者、关键事件、首发阵容等），并严格按照模板格式输出。请注意这是一场已经结束的比赛。"
+                    search_query = f"请为 {match} 搜集比赛的赛前关键信息（首发阵容、伤病、赔率、历史交锋、教练发言、出线形势），并严格按照模板格式输出。请注意：这是一场已经结束的比赛，但请只搜集「赛前」信息，不要包含最终比分或赛后数据。"
                 else:
                     search_query = f"请为 {match} 搜集赛前关键信息，并严格按照模板格式输出。"
                 result = call_deepseek(system_prompt_search, search_query, enable_search=True, search_mode="pre_match", model=MODEL_SEARCH)
