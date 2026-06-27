@@ -350,7 +350,7 @@ def _deepseek_chat(system_prompt, user_content):
         url=URL,
         headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
         json={
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-pro",
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content}
