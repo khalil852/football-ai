@@ -1137,7 +1137,9 @@ def call_deepseek(system_prompt, user_query, enable_search=False, search_mode="p
     if football_data:
         return _deepseek_chat(
             system_prompt,
-            f"{user_query}\n\n[实时数据]\n{football_data}",
+            f"{user_query}\n\n"
+            f"**【硬性约束】ESPN API 已确认以下事实，不得覆盖：**\n{football_data}\n\n"
+            f"**ESPN 未提供的字段（阵容/教练/裁判）仅从搜索结果获取，不要从训练数据推测。**",
             model=model
         )
 
