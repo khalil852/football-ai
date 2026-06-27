@@ -784,9 +784,14 @@ def save_record(match, search_report, analysis_report):
         "analysis_report": analysis_report,
         "calibration": None,
         "match_time": match_time,
-        "training_mode": is_training
+        "training_mode": is_training,
     }
-    supabase.table("history").insert(record).execute()
+    try:
+        supabase.table("history").insert(record).execute()
+    except Exception:
+        # training_mode 列可能不存在（旧数据库），去掉后重试
+        record.pop("training_mode", None)
+        supabase.table("history").insert(record).execute()
 
 def load_history():
     response = supabase.table("history").select("*").eq("username", st.session_state.username).order("timestamp", desc=True).execute()
