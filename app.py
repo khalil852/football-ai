@@ -247,6 +247,75 @@ if st.session_state.deepseek_key:
 else:
     st.sidebar.info("ℹ️ 正在使用 UP 主的共享 API Key")
 
+# ---- 管理工具：定律库兼容性升级 ----
+def _upgrade_single_law(law: dict) -> dict:
+    """用 AI 将一条定律的 lambda_effect 转换为 modifier_map"""
+    prompt = (
+        "将以下足球定律的 lambda_effect 文本转换为乘性修正因子 JSON。\n"
+        "规则:\n"
+        "- 取值为乘性因子，1.0=无影响, 0.70-0.85=严重削弱, 0.86-0.95=轻微削弱, 1.05-1.15=轻微增强, 1.16-1.30=显著增强\n"
+        "- 如果原文是加法修正(如 λ-0.3)，假设 λ≈1.5，转为乘性: factor=(1.5+delta)/1.5\n"
+        "- key 用英文 snake_case\n"
+        "- 仅输出 JSON，不要任何解释\n"
+        f"\n定律: {law.get('name','')}\n"
+        f"内容: {law.get('content','')}\n"
+        f"触发条件: {law.get('trigger','')}\n"
+        f"λ效果: {law.get('lambda_effect','')}\n"
+    )
+    try:
+        resp = requests.post(
+            url=URL,
+            headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+            json={"model": "deepseek-chat", "messages": [{"role":"user","content": prompt}],
+                  "max_tokens": 200, "temperature": 0.0},
+            timeout=15
+        )
+        data = resp.json()
+        content = data["choices"][0]["message"].get("content", "")
+        m = re.search(r'\{[\s\S]*\}', content)
+        if m:
+            return json.loads(m.group())
+    except Exception:
+        pass
+    return {}
+
+
+def _upgrade_all_laws():
+    """批量升级定律库兼容性：为每条定律添加 modifier_map 字段"""
+    try:
+        resp = supabase.table("laws").select("*").or_(
+            f"username.eq.{st.session_state.username},username.eq.admin"
+        ).execute()
+        laws = resp.data or []
+        upgraded = 0
+        progress = st.progress(0)
+        for i, law in enumerate(laws):
+            progress.progress((i + 1) / len(laws))
+            # 跳过已有 modifier_map 的
+            if law.get("modifier_map"):
+                continue
+            mm = _upgrade_single_law(law)
+            if mm:
+                supabase.table("laws").update({"modifier_map": mm}).eq("id", law["id"]).execute()
+                upgraded += 1
+        progress.empty()
+        return upgraded
+    except Exception as e:
+        st.error(f"升级失败: {e}")
+        return -1
+
+
+st.sidebar.markdown("---")
+with st.sidebar.expander("🛠️ 管理工具", expanded=False):
+    if st.button("🔄 一键升级定律库", use_container_width=True,
+                 help="为每条定律添加 modifier_map 字段，兼容新数学引擎"):
+        with st.spinner("正在升级定律库..."):
+            count = _upgrade_all_laws()
+            if count >= 0:
+                st.success(f"已为 {count} 条定律添加 modifier_map。")
+                st.info("定律库现已兼容新数学引擎。")
+                st.rerun()
+
 # 用户自定义 Key 优先，否则用 UP 主共享 Key
 API_KEY = st.session_state.deepseek_key or DEFAULT_DEEPSEEK_KEY
 URL = "https://api.deepseek.com/v1/chat/completions"
@@ -580,51 +649,30 @@ def calibrate_math(pred: MatchPrediction, actual_h: int, actual_a: int) -> Calib
                              score_match=score_match, result_match=result_match,
                              goal_deviation=round(deviation, 2))
 
+# ---- 精简版 prompt：定律已有 modifier_map 时使用，AI 只需匹配 trigger ----
+_LAW_WEIGHT_MAP_PROMPT = (
+    "你是一个足球量化分析师。逐条检查定律的 trigger 是否匹配本场比赛。\n"
+    "如果匹配，直接使用定律自带的 modifier_map 值，不要修改。\n"
+    "输出 JSON: {\"merged_modifiers\": {\"attack\": 0.85, ...}, "
+    "\"lam_h_initial\": 1.5, \"lam_a_initial\": 1.3, "
+    "\"phi\": 0.15, \"lam_c\": 0.05, \"home_adv\": true, "
+    "\"odds_h\": null, \"odds_d\": null, \"odds_a\": null, "
+    "\"triggered\": [\"匹配的定律名1\"], \"summary\": \"一句话\"}\n"
+    "仅输出 JSON，不要解释。"
+)
 
-# ---- 定律库驱动的参数提取 ----
-_LAW_WEIGHT_PROMPT = """你是一个足球量化分析师。你的任务是逐条检查"全维推演定律库"中的每一条定律是否被本场比赛触发，并对触发的定律给出精确的乘性修正权重。
-
-## 工作流程
-1. 阅读赛前数据报告，理解比赛背景
-2. 逐条阅读定律库中的定律，判断其 trigger 是否被满足
-3. 对每条触发的定律，输出精确的乘性修正因子和影响的变量名
-
-## 关键规则
-- 逐条处理，不要跳过任何定律。不触发的定律也要出现在输出中（applies=false）
-- 如果定律的 lambda_effect 有数值区间（如 "进攻λ -0.3 至 -0.5"），根据情境取精确值
-- 如果定律的 lambda_effect 只有定性描述（如 "需用数学模型修正"、"置信度大幅降低"），你需要自己推断出合理的数值
-- 如果定律影响多个维度（如 "领先后退守" 同时影响 attack 和 defense），在 modifiers 中列出所有影响的维度
-- 你可以自由定义 modifier 的 key 名（attack, defense, coach_intent, confidence, tempo, psychology 等）。key 名用英文 snake_case
-- 无影响的维度不需要出现在 modifiers 中
-- 加法修正转乘性：factor = (λ + delta) / λ。例：λ=1.5, delta=-0.4 → factor = 1.1/1.5 ≈ 0.73
-- 权重区间参考：0.70-0.85 严重削弱 | 0.86-0.95 轻微削弱 | 1.0 无影响 | 1.05-1.15 轻微增强 | 1.16-1.30 显著增强
-
-## 输出
-仅输出一个 JSON 对象，不要任何解释:
-{
-  "home_team": "主队名",
-  "away_team": "客队名",
-  "lam_h_initial": 1.5,
-  "lam_a_initial": 1.3,
-  "phi": 0.15,
-  "lam_c": 0.05,
-  "home_adv": true,
-  "odds_h": 1.65,
-  "odds_d": 3.80,
-  "odds_a": 5.50,
-  "law_effects": [
-    {
-      "law_id": "定律的id或name",
-      "law_name": "定律名称",
-      "applies": true,
-      "modifiers": {"attack": 0.85},
-      "reason": "为什么触发/为什么不触发,一句话"
-    }
-  ],
-  "merged_modifiers": {"attack": 0.85, "coach_intent": 1.08, "confidence": 0.9},
-  "summary": "一句话总结本场最关键的一条定律及其影响"
-}
-"""
+# ---- 回退版 prompt：定律没有 modifier_map，AI 需自行推断因子 ----
+_LAW_WEIGHT_PROMPT_FALLBACK = (
+    "你是一个足球量化分析师。逐条检查定律是否匹配本场比赛。\n"
+    "对匹配的定律，根据 lambda_effect 推断乘性修正因子。\n"
+    "加法转乘性：factor = (λ + delta) / λ，假设 λ≈1.5。\n"
+    "权重参考：0.70-0.85 严重削弱 | 0.86-0.95 轻微削弱 | 1.0 无影响 | 1.05-1.15 轻微增强。\n"
+    "输出 JSON: {\"merged_modifiers\": {\"attack\": 0.85, ...}, "
+    "\"lam_h_initial\": 1.5, \"lam_a_initial\": 1.3, "
+    "\"phi\": 0.15, \"lam_c\": 0.05, \"home_adv\": true, "
+    "\"odds_h\": null, \"odds_d\": null, \"odds_a\": null}\n"
+    "仅输出 JSON，不要解释。"
+)
 
 
 def _laws_to_modifiers(search_report: str, laws: list) -> dict:
@@ -637,14 +685,32 @@ def _laws_to_modifiers(search_report: str, laws: list) -> dict:
     if not active_laws:
         active_laws = laws
 
-    laws_json = json.dumps(active_laws, ensure_ascii=False, indent=2)
+    # 检查是否所有定律都有 modifier_map
+    all_have_map = all(l.get("modifier_map") for l in active_laws)
+
+    # 构建精简 law 摘要（有 modifier_map 时只传 key 字段）
+    law_summaries = []
+    for l in active_laws:
+        entry = {
+            "name": l.get("name", ""),
+            "trigger": l.get("trigger", ""),
+            "content": l.get("content", ""),
+        }
+        if l.get("modifier_map"):
+            entry["modifier_map"] = l["modifier_map"]
+        else:
+            entry["lambda_effect"] = l.get("lambda_effect", "")
+        law_summaries.append(entry)
+
+    system_msg = _LAW_WEIGHT_MAP_PROMPT if all_have_map else _LAW_WEIGHT_PROMPT_FALLBACK
+    laws_json = json.dumps(law_summaries, ensure_ascii=False, indent=2)
 
     try:
-        payload = {"max_tokens": 1200, "temperature": 0.0}
+        payload = {"max_tokens": 800 if all_have_map else 1200, "temperature": 0.0}
         payload.update(MODEL_LAW_PARAMS)
         payload.update({
             "messages": [
-                {"role": "system", "content": _LAW_WEIGHT_PROMPT},
+                {"role": "system", "content": system_msg},
                 {"role": "user",
                  "content": f"## 赛前数据报告\n{search_report[:6000]}\n\n## 定律库\n{laws_json}"}
             ],
@@ -662,9 +728,11 @@ def _laws_to_modifiers(search_report: str, laws: list) -> dict:
         m = re.search(r'\{[\s\S]*\}', content)
         if m:
             result = json.loads(m.group())
-            # 展示触发的定律
-            law_effects = result.get("law_effects", [])
-            triggered = [f'{e["law_name"]}' for e in law_effects if e.get("applies")]
+            # 展示触发的定律（兼容新旧两种格式）
+            triggered = result.get("triggered", [])  # 新格式: string列表
+            if not triggered:
+                law_effects = result.get("law_effects", [])  # 旧格式: 对象数组
+                triggered = [e.get("law_name", "") for e in law_effects if e.get("applies")]
             if triggered:
                 st.info(f"📋 触发 {len(triggered)}/{len(active_laws)} 条定律: {', '.join(triggered[:5])}")
             return result
