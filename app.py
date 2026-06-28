@@ -565,6 +565,8 @@ class MatchPrediction:
     exp_a: float = 0.0
     top_scores: list = field(default_factory=list)
     confidence: float = 0.0
+    locked_h: int = 0
+    locked_a: int = 0
 
 
 @dataclass
@@ -638,6 +640,7 @@ def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
         else:          aw += p
 
     top = sorted(probs.items(), key=lambda x: x[1], reverse=True)[:5]
+    locked_h, locked_a = top[0][0] if top else (round(eh), round(ea))
 
     conf = 1.0
     if odds:
@@ -647,17 +650,20 @@ def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
     return MatchPrediction(home_team=home, away_team=away,
                            lam_h=lh, lam_a=la, lam_c=lam_c, phi=phi,
                            home_win=hw, draw=dw, away_win=aw,
-                           exp_h=eh, exp_a=ea, top_scores=top, confidence=conf)
+                           exp_h=eh, exp_a=ea, top_scores=top, confidence=conf,
+                           locked_h=locked_h, locked_a=locked_a)
 
 
 # ---- 赛后校准 ----
 def calibrate_math(pred: MatchPrediction, actual_h: int, actual_a: int) -> CalibrationResult:
-    score_match = (round(pred.exp_h) == actual_h and round(pred.exp_a) == actual_a)
+    pred_h = pred.locked_h
+    pred_a = pred.locked_a
+    score_match = (pred_h == actual_h and pred_a == actual_a)
     pred_r = "home" if pred.home_win > max(pred.draw, pred.away_win) else \
              "draw" if pred.draw > max(pred.home_win, pred.away_win) else "away"
     actual_r = "home" if actual_h > actual_a else "draw" if actual_h == actual_a else "away"
     result_match = (pred_r == actual_r)
-    deviation = abs(pred.exp_h - actual_h) + abs(pred.exp_a - actual_a)
+    deviation = abs(pred_h - actual_h) + abs(pred_a - actual_a)
     score = max(0, min(100, 100 - deviation * 15 - (0 if result_match else 25) -
                        (0 if pred.confidence >= 0.5 else 10)))
     return CalibrationResult(accuracy_score=round(score, 1),
@@ -801,29 +807,53 @@ def _extract_params(search_report: str, laws: list = None) -> dict:
     return {}
 
 
-# ---- 结构化推演结果转报告 ----
+# ---- 推演报告 prompt（硬约束：不得修改数学引擎的输出）----
 _ANALYSIS_FROM_JSON_PROMPT = (
-    "你是一位专业的足球推演分析师。以下是 Python 数学引擎计算出的结构化推演结果。"
-    "请基于这些数据，生成一份完整的全维推演报告。\n\n"
-    "报告要求:\n"
-    "1. 列出关键修正因子及其依据\n"
-    "2. 展示比分概率分布\n"
-    "3. 给出最可能比分和胜负预测\n"
-    "4. 标注模型置信度\n"
-    "5. 如果提供了赔率数据，说明市场与模型的分歧"
+    "将 Python 数学引擎计算结果格式化为推演报告。\n"
+    "**硬性规则**\n"
+    "- 锁定比分必须原样引用 JSON 的「锁定比分」字段，一字不改\n"
+    "- 期望进球、胜负概率也直接引用 JSON 数值\n"
+    "- 不要写「我认为」「分析师判断」等主观表述\n"
+    "- 报告结构如下（总分不超过 250 字）:\n"
+    "\n"
+    "### 🎯 推演比分\n"
+    "**X - Y**  (主队在前)\n"
+    "\n"
+    "### ⏱ 关键时间\n"
+    "[上半场/下半场/补时等关键进球时段，基于期望进球和修正因子判断]\n"
+    "\n"
+    "### 概率\n"
+    "主胜 X% | 平 X% | 客胜 X% | 置信度 X%\n"
+    "\n"
+    "### 修正摘要\n"
+    "[1-2句话说明触发了哪些修正因子及其影响]\n"
+    "\n"
+    "<details><summary>📊 完整数据</summary>\n"
+    "修正因子: [key=value 列表]\n"
+    "比分概率: [top5 列表]\n"
+    "λλ主: X.XX | λ客: X.XX\n"
+    "</details>"
 )
 
 
-# ---- 结构化校准结果转报告 ----
+# ---- 校准报告 prompt（同上）----
 _CALIBRATE_FROM_JSON_PROMPT = (
-    "你是一位专业的足球赛后分析师。以下是 Python 数学引擎计算出的校准结果。"
-    "请基于这些数据，生成一份完整的赛后校准报告，包含:\n"
-    "1. 准确率评分\n"
-    "2. 偏差分析 (验证/推翻的逻辑)\n"
-    "3. 新定律/补丁建议 (JSON 格式)\n"
-    "4. 现有定律修改建议 (JSON 格式)\n\n"
-    "当前生效的定律库作为参考附在下方。"
+    "将校准结果格式化为报告。\n"
+    "**硬性规则**\n"
+    "- 评分直接引用，一字不改\n"
+    "- 结构:\n"
+    "  ### 准确率: XX/100\n"
+    "  <small>比分命中: Y/N | 胜负命中: Y/N | 偏差: X.X球</small>\n"
+    "  ### 差异\n"
+    "  ✅ [被验证的逻辑, 每条 ≤1 句]\n"
+    "  ⚠️ [被推翻的逻辑, 每条 ≤1 句, 含根因]\n"
+    "  <details><summary>📎 定律与术语</summary>\n"
+    "  新定律 JSON + 修改建议 JSON\n"
+    "  </details>\n"
+    "- 总字数 ≤300"
 )
+
+# （旧版 _CALIBRATE_FROM_JSON_PROMPT 已移除，统一使用上方精简版）
 
 
 # ---- 48 队默认 λ 进球率（场均进球，基于 FIFA 排名 + 近期大赛数据） ----
@@ -1253,51 +1283,49 @@ def calibrate_record(record, max_attempts=3):
         math_block = (
             f"\n\n【Python 数学引擎校准结果】\n"
             f"准确率评分: {math_cal.accuracy_score}/100\n"
-            f"推演期望: {pred.exp_h:.2f} - {pred.exp_a:.2f} → 实际: {actual_h} - {actual_a}\n"
-            f"进球偏差: {math_cal.goal_deviation:.1f}球\n"
+            f"推演比分: {pred.locked_h} - {pred.locked_a} → 实际比分: {actual_h} - {actual_a}\n"
+            f"进球偏差: {math_cal.goal_deviation}球 (推演{abs(pred.locked_h - actual_h)} + {abs(pred.locked_a - actual_a)})\n"
             f"比分命中: {'是' if math_cal.score_match else '否'} | "
             f"胜负命中: {'是' if math_cal.result_match else '否'}\n"
         )
 
-    summary_prompt = f"""你是一位专业的足球赛后分析师。请进行偏差分析并提炼新定律。
+    summary_prompt = f"""你是赛后分析师。进行偏差分析并提炼新定律。
 
-## ⚠️ 核心规则
-1. 严格基于赛后真实数据分析，严禁编造。
-2. 不确定信息标注"暂无"。
-3. 所有比分与赛后数据完全一致。
+## 规则
+1. 赛后数据为准，严禁编造比分
+2. 不确定标「暂无」
 
-## 赛后真实数据
+## 赛后数据
 {post_match_data[:6000]}
 
-## 赛前推演报告
-{record['analysis_report'][:6000]}
+## 赛前推演
+推演比分: {pred.locked_h}-{pred.locked_a}
+{record['analysis_report'][:4000]}
 {math_block}
 
-## 当前生效的定律库
+## 定律库
 {laws_text}
 
-## 输出要求
-先输出 JSON 摘要，再输出自然语言分析，最后附新定律和修改建议。
+## 输出
+报告结构:
+### 准确率: {math_cal.accuracy_score if math_cal else '?'}/100
+<small>推演 {pred.locked_h}-{pred.locked_a} | 实际 {actual_h}-{actual_a} | 偏差 {math_cal.goal_deviation if math_cal else '?'}球</small>
 
-JSON摘要:
-```json
-{{
-  "final_score": "{actual_h}-{actual_a}",
-  "accuracy_score": {math_cal.accuracy_score if math_cal else "0-100 的整数"},
-  "key_events": []
-}}
-```
+### 差异
+✅ [被验证的逻辑, 每条≤1句]
+⚠️ [被推翻的逻辑, 每条≤1句]
 
-新定律 (JSON 列表):
+<details><summary>📎 定律更新</summary>
+新定律 JSON:
 ```json
 [{{"name": "...", "content": "...", "trigger": "...", "lambda_effect": "..."}}]
 ```
-
-修改建议 (JSON 列表):
+修改建议 JSON:
 ```json
 [{{"id": "...", "name": "...", "content": "...", "trigger": "...", "lambda_effect": "..."}}]
 ```
-"""
+</details>
+总字数≤300。"""
 
     calibration_report = _deepseek_chat(
         _CALIBRATE_FROM_JSON_PROMPT, summary_prompt,
@@ -1610,13 +1638,14 @@ with col2:
                     modifier_info[k] = v
 
                 math_json = json.dumps({
+                    "锁定比分": f"{pred.locked_h}-{pred.locked_a}",
                     "主队": pred.home_team, "客队": pred.away_team,
                     "主队λ": round(pred.lam_h, 2), "客队λ": round(pred.lam_a, 2),
                     "期望进球": f"{pred.exp_h:.2f} - {pred.exp_a:.2f}",
                     "主胜": f"{pred.home_win*100:.1f}%",
                     "平局": f"{pred.draw*100:.1f}%",
                     "客胜": f"{pred.away_win*100:.1f}%",
-                    "最可能比分": [f"{h}-{a} ({p*100:.1f}%)" for (h, a), p in pred.top_scores[:5]],
+                    "比分概率": [f"{h}-{a} ({p*100:.1f}%)" for (h, a), p in pred.top_scores[:5]],
                     "模型置信度": f"{pred.confidence*100:.0f}%",
                     "定律修正因子": modifier_info,
                 }, ensure_ascii=False, indent=2)
@@ -1624,7 +1653,9 @@ with col2:
                 analysis_query = (
                     f"赛前数据报告:\n{st.session_state.search_report[:6000]}\n\n"
                     f"数学模型计算结果 (Python 引擎):\n{math_json}\n\n"
-                    f"请基于以上信息，生成完整的全维推演报告。"
+                    f"**【最高优先级】报告中必须使用以上「锁定比分」字段的值作为最终推演比分。"
+                    f"你不得修改、重新计算、或给出任何其他比分预测。**\n"
+                    f"请基于以上信息生成推演报告。"
                 )
                 if training_mode:
                     analysis_query = "注意：这是一场已结束的历史比赛，请忽略最终比分，模拟赛前视角。\n" + analysis_query
