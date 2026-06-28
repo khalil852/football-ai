@@ -925,13 +925,13 @@ def _tavily_search(query):
                 "search_depth": "basic",
                 "max_results": 5
             },
-            timeout=15
+            timeout=20
         )
         data = resp.json()
         results = []
         for item in data.get("results", []):
             content = item.get("content", "")
-            if len(content) > 10:  # 降低门槛，保留有用短数据
+            if len(content) > 10:
                 results.append(f"- {item.get('title', '')}: {content}")
         return "\n".join(results) if results else "搜索未返回有效结果。"
     except Exception as e:
@@ -1340,12 +1340,15 @@ with col1:
     btn_label = "🔍 搜集赛前数据" if not training_mode else "🔍 搜集历史数据"
     if st.button(btn_label, use_container_width=True):
         if match:
-            with st.spinner("正在搜索并汇总数据，请耐心等待..."):
+            status_placeholder = st.empty()
+            status_placeholder.info("🔍 正在搜索并汇总数据，请耐心等待...（预计 20-40 秒）")
+            try:
                 if training_mode:
                     search_query = f"请为 {match} 搜集比赛的赛前关键信息（首发阵容、伤病、赔率、历史交锋、教练发言、出线形势），并严格按照模板格式输出。请注意：这是一场已经结束的比赛，但请只搜集「赛前」信息，不要包含最终比分或赛后数据。"
                 else:
                     search_query = f"请为 {match} 搜集赛前关键信息，并严格按照模板格式输出。"
                 result = call_deepseek(system_prompt_search, search_query, enable_search=True, search_mode="pre_match", model=MODEL_SEARCH)
+                status_placeholder.empty()
                 if result:
                     st.session_state.search_report = result
                     st.session_state.current_match = match
@@ -1359,6 +1362,11 @@ with col1:
                         st.info("ℹ️ 训练模式：已跳过时间校验，可直接校准。")
                     else:
                         st.info("ℹ️ 未提取到开赛时间，赛后校准将需要手动确认。")
+                else:
+                    st.warning("搜索未返回有效结果，请重试。")
+            except Exception as e:
+                status_placeholder.empty()
+                st.error(f"搜索出错: {str(e)[:80]}")
         else:
             st.warning("请先输入比赛名称")
 
