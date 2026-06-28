@@ -1534,32 +1534,6 @@ if new_drafts or modified_drafts:
                         st.rerun()
                 st.divider()
 
-# ---- 删除确认（放在 expander 外，避免 re-render 丢失状态）----
-if "pending_delete_law" in st.session_state and st.session_state["pending_delete_law"]:
-    law_id = st.session_state["pending_delete_law"]
-    law_name = st.session_state.get("pending_delete_name", "")
-    is_admin_law = st.session_state.get("pending_delete_admin", False)
-    msg = f'确认删除"{law_name}"？'
-    if is_admin_law:
-        msg += " 这是管理员创建的原始定理，删除后可能影响推演质量。"
-    msg += " 此操作不可恢复。"
-    st.warning(msg)
-    cc, c2, c3 = st.columns([1, 1, 4])
-    with cc:
-        if st.button("✅ 确认", key="do_confirm_delete", use_container_width=True):
-            if delete_law_from_supabase(law_id):
-                st.success("定律已删除。")
-                for k in ("pending_delete_law", "pending_delete_name", "pending_delete_admin"):
-                    st.session_state.pop(k, None)
-                st.rerun()
-            else:
-                st.error("删除失败，请重试。")
-    with c2:
-        if st.button("取消", key="cancel_delete", use_container_width=True):
-            for k in ("pending_delete_law", "pending_delete_name", "pending_delete_admin"):
-                st.session_state.pop(k, None)
-            st.rerun()
-
 # 现有定律
 with st.expander("查看/管理所有定律", expanded=False):
     st.info("💡 开关按钮用于控制该定律是否参与赛前推演。关闭后，模型将不会调用该定律。所有修改会自动保存到云端数据库。")
@@ -1589,10 +1563,9 @@ with st.expander("查看/管理所有定律", expanded=False):
             
             with col_delete:
                 if st.button("🗑️", key=f"delete_law_{law['id']}", help="删除此定律"):
-                    st.session_state["pending_delete_law"] = law["id"]
-                    st.session_state["pending_delete_name"] = law["name"]
-                    st.session_state["pending_delete_admin"] = law.get("username") == "admin"
-                    st.rerun()
+                    if delete_law_from_supabase(law["id"]):
+                        st.toast(f"已删除: {law['name']}", icon="🗑️")
+                        st.rerun()
             st.divider()
     else:
         st.warning("定律库为空，请先添加定律。")
