@@ -1830,28 +1830,46 @@ with st.expander("查看推演准确率统计", expanded=True):
     if average_score is None:
         st.info("暂无已校准记录，无法计算准确率。请先完成至少一次赛后校准。")
     else:
-        col_avg, col_count = st.columns(2)
+        col_avg, col_count, col_trend = st.columns(3)
         with col_avg:
             st.metric("综合平均准确率", f"{average_score} / 100")
         with col_count:
             st.metric("已校准场次", len(scored_records))
+        with col_trend:
+            latest_5 = [r["score"] for r in scored_records[:5]]
+            trend = "↑" if len(latest_5) >= 2 and latest_5[0] >= latest_5[-1] else "↓"
+            st.metric("近期趋势", f"{trend} {sum(latest_5)/len(latest_5):.0f}/100" if latest_5 else "—")
 
-        st.markdown("### 按日期查看")
-        selected_date = st.date_input("选择日期", value=None)
+        # ---- 每日准确率折线图 ----
+        from collections import defaultdict
+        daily = defaultdict(list)
+        for r in scored_records:
+            day = r["timestamp"][:10]
+            daily[day].append(r["score"])
+        # 按日期排序
+        sorted_days = sorted(daily.items())
+        if len(sorted_days) >= 2:
+            import pandas as pd
+            chart_data = pd.DataFrame(
+                {"日期": day, "准确率": round(sum(scores) / len(scores), 1)}
+                for day, scores in sorted_days
+            ).set_index("日期")
+            st.line_chart(chart_data, height=200)
+        else:
+            st.caption("需要至少2天的记录才能生成趋势图。")
 
-        if selected_date:
-            filtered = [r for r in scored_records if r["timestamp"].startswith(str(selected_date))]
-            if filtered:
-                date_avg = round(sum(r["score"] for r in filtered) / len(filtered), 1)
-                st.metric(f"{selected_date} 准确率", f"{date_avg} / 100")
-                for r in filtered:
-                    st.write(f"- {r['match']}: {r['score']}分")
-            else:
-                st.info("该日期无已校准记录。")
-
-        st.markdown("### 最近校准记录")
-        for r in scored_records[:5]:
-            st.write(f"- {r['match']} ({r['timestamp']}): {r['score']}分")
+        with st.expander("按日期查看", expanded=False):
+            selected_date = st.date_input("选择日期", value=None)
+            if selected_date:
+                sd = str(selected_date)
+                filtered = [r for r in scored_records if r["timestamp"].startswith(sd)]
+                if filtered:
+                    date_avg = round(sum(r["score"] for r in filtered) / len(filtered), 1)
+                    st.metric(f"{sd} 准确率", f"{date_avg} / 100")
+                    for r in filtered:
+                        st.write(f"- {r['match']}: {r['score']}分")
+                else:
+                    st.info("该日期无已校准记录。")
 
 # ============ 历史记录 ============
 st.markdown("---")
