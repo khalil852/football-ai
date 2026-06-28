@@ -433,27 +433,50 @@ def get_match_status(match_time_str):
         return "已结束", "🟢"
 
 
+def _check_espn_post_status():
+    """快速检查 ESPN 当前 scoreboard 是否有 post-match 状态的比赛"""
+    try:
+        resp = requests.get(_ESPN_SCOREBOARD, timeout=5)
+        data = resp.json()
+        for ev in data.get("events", []):
+            if ev["status"]["type"]["state"] == "post":
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def can_calibrate(match_time_str):
     """判断是否可以校准。返回 (bool, str)"""
     now = datetime.now()
 
+    # ESPN API 实时状态检查
+    espn_post = _check_espn_post_status()
+
+    if match_time_str:
+        match_time = parse_match_time(match_time_str)
+    else:
+        match_time = None
+
+    if match_time:
+        earliest_end = match_time + timedelta(minutes=150)
+        if now < match_time:
+            return False, f"⏳ 比赛尚未开始 ({match_time.strftime('%Y-%m-%d %H:%M')}，北京时间)，请等待开赛后再校准。"
+        elif now < earliest_end and not espn_post:
+            return False, f"⏳ 比赛仍在进行中 (预计最早 {earliest_end.strftime('%Y-%m-%d %H:%M')} 北京时间结束)，请耐心等待。"
+        elif now < earliest_end and espn_post:
+            return True, f"✅ 比赛已结束 (ESPN 确认)，可以校准。"
+        else:
+            return True, f"✅ 比赛已结束，可以校准。"
+
+    # 无时间信息，但 ESPN 确认比赛已结束
+    if espn_post:
+        return True, "✅ ESPN 确认比赛已结束，可以校准。"
+
     if not match_time_str:
-        # 无时间信息时，给一个较宽松的兜底：
-        # 如果相关报告存在超过 6 小时，允许校准
         return False, "⚠️ 未找到开赛时间，无法自动判断。请确认比赛已结束后再手动校准。"
 
-    match_time = parse_match_time(match_time_str)
-    if not match_time:
-        return False, f"⚠️ 无法解析开赛时间 ({match_time_str})，请确认比赛已结束后再手动校准。"
-
-    earliest_end = match_time + timedelta(minutes=150)
-
-    if now < match_time:
-        return False, f"⏳ 比赛尚未开始 ({match_time.strftime('%Y-%m-%d %H:%M')}，北京时间)，请等待开赛后再校准。"
-    elif now < earliest_end:
-        return False, f"⏳ 比赛仍在进行中 (预计最早 {earliest_end.strftime('%Y-%m-%d %H:%M')} 北京时间结束)，请耐心等待。"
-    else:
-        return True, f"✅ 比赛已结束，可以校准。"
+    return False, f"⚠️ 无法解析开赛时间 ({match_time_str})，请确认比赛已结束后再手动校准。"
 
 # ============ 模型分配策略（基于 4x3x2 全模型压力测试）============
 # deepseek-chat:     最快轻量模型 (5.2s search, 5.6s analysis), 成本 $0.00012
@@ -936,6 +959,29 @@ def _parse_teams(query):
                 if t1 != t2:
                     return t1, t2
     return None, None
+
+
+def _try_espn_date(team1_name, team2_name):
+    """从 ESPN API 提取比赛日期，成功返回 'YYYY-MM-DD HH:MM'，失败返回 ''"""
+    try:
+        t1_id = _ESPN_TEAMS.get(team1_name)
+        t2_id = _ESPN_TEAMS.get(team2_name)
+        if not t1_id or not t2_id:
+            return ""
+        resp = requests.get(_ESPN_SCOREBOARD, timeout=5)
+        data = resp.json()
+        for ev in data.get("events", []):
+            c = ev["competitions"][0]
+            c1 = str(c["competitors"][0]["id"])
+            c2 = str(c["competitors"][1]["id"])
+            if (c1 == t1_id and c2 == t2_id) or (c1 == t2_id and c2 == t1_id):
+                raw_date = ev.get("date", "")
+                if raw_date:
+                    return raw_date[:16].replace("T", " ")
+                break
+    except Exception:
+        pass
+    return ""
 
 
 def _try_espn_api(match_query, search_mode):
@@ -1541,13 +1587,19 @@ with col1:
                 if result:
                     st.session_state.search_report = result
                     st.session_state.current_match = match
-                    extracted_time = extract_match_time(result)
-                    st.session_state.current_match_time = extracted_time
-                    if extracted_time:
-                        st.success(f"✅ 开赛时间：{extracted_time}")
+
+                    # 优先 ESPN 结构化日期，再回退文本提取
+                    espn_date = _try_espn_date(team1, team2)
+                    if espn_date:
+                        st.session_state.current_match_time = espn_date
+                        st.success(f"✅ 开赛时间：{espn_date} (ESPN)")
                     else:
-                        if training_mode:
-                            st.session_state.current_match_time = "2000-01-01 00:00"  # 远古时间，保证 can_calibrate 通过
+                        extracted_time = extract_match_time(result)
+                        if extracted_time:
+                            st.session_state.current_match_time = extracted_time
+                            st.success(f"✅ 开赛时间：{extracted_time}")
+                        elif training_mode:
+                            st.session_state.current_match_time = "2000-01-01 00:00"
                             st.info("ℹ️ 训练模式：已跳过时间校验，可直接校准。")
                         else:
                             st.info("ℹ️ 未提取到开赛时间，赛后校准将需要手动确认。")
