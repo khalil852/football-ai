@@ -22,7 +22,7 @@ from supabase import create_client, Client
 #   SUPABASE_KEY           = "sb_secret_xxx"          # service_role key
 #   default_deepseek_key   = "sk-xxx"                 # UP 主的共享 DeepSeek Key
 #   default_tavily_key     = "tvly-xxx"               # UP 主的共享 Tavily Key（可选）
-#   (ESPN API 免费无需 Key，世界杯数据全自动获取)
+#   Tavily API Key 用于联网搜索数据
 #   analysis_prompt        = '''多行文本'''            # 推演 AI 的 system prompt
 # =============================================================================
 
@@ -433,50 +433,25 @@ def get_match_status(match_time_str):
         return "已结束", "🟢"
 
 
-def _check_espn_post_status():
-    """快速检查 ESPN 当前 scoreboard 是否有 post-match 状态的比赛"""
-    try:
-        resp = requests.get(_ESPN_SCOREBOARD, timeout=5)
-        data = resp.json()
-        for ev in data.get("events", []):
-            if ev["status"]["type"]["state"] == "post":
-                return True
-    except Exception:
-        pass
-    return False
-
-
 def can_calibrate(match_time_str):
     """判断是否可以校准。返回 (bool, str)"""
     now = datetime.now()
 
-    # ESPN API 实时状态检查
-    espn_post = _check_espn_post_status()
-
-    if match_time_str:
-        match_time = parse_match_time(match_time_str)
-    else:
-        match_time = None
-
-    if match_time:
-        earliest_end = match_time + timedelta(minutes=150)
-        if now < match_time:
-            return False, f"⏳ 比赛尚未开始 ({match_time.strftime('%Y-%m-%d %H:%M')}，北京时间)，请等待开赛后再校准。"
-        elif now < earliest_end and not espn_post:
-            return False, f"⏳ 比赛仍在进行中 (预计最早 {earliest_end.strftime('%Y-%m-%d %H:%M')} 北京时间结束)，请耐心等待。"
-        elif now < earliest_end and espn_post:
-            return True, f"✅ 比赛已结束 (ESPN 确认)，可以校准。"
-        else:
-            return True, f"✅ 比赛已结束，可以校准。"
-
-    # 无时间信息，但 ESPN 确认比赛已结束
-    if espn_post:
-        return True, "✅ ESPN 确认比赛已结束，可以校准。"
-
     if not match_time_str:
         return False, "⚠️ 未找到开赛时间，无法自动判断。请确认比赛已结束后再手动校准。"
 
-    return False, f"⚠️ 无法解析开赛时间 ({match_time_str})，请确认比赛已结束后再手动校准。"
+    match_time = parse_match_time(match_time_str)
+    if not match_time:
+        return False, f"⚠️ 无法解析开赛时间 ({match_time_str})，请确认比赛已结束后再手动校准。"
+
+    earliest_end = match_time + timedelta(minutes=150)
+
+    if now < match_time:
+        return False, f"⏳ 比赛尚未开始 ({match_time.strftime('%Y-%m-%d %H:%M')}，北京时间)，请等待开赛后再校准。"
+    elif now < earliest_end:
+        return False, f"⏳ 比赛仍在进行中 (预计最早 {earliest_end.strftime('%Y-%m-%d %H:%M')} 北京时间结束)，请耐心等待。"
+    else:
+        return True, f"✅ 比赛已结束，可以校准。"
 
 # ============ 模型分配策略（基于 4x3x2 全模型压力测试）============
 # deepseek-chat:     最快轻量模型 (5.2s search, 5.6s analysis), 成本 $0.00012
@@ -879,236 +854,7 @@ _CALIBRATE_FROM_JSON_PROMPT = (
 # （旧版 _CALIBRATE_FROM_JSON_PROMPT 已移除，统一使用上方精简版）
 
 
-# ---- 48 队默认 λ 进球率（场均进球，基于 FIFA 排名 + 近期大赛数据） ----
-# AI 提取失败时回退到此表。乘性修正因子在此基准上叠加。
-_DEFAULT_LAM = {
-    "阿根廷": 2.0, "法国": 2.1, "巴西": 2.0, "英格兰": 1.8, "德国": 1.9,
-    "西班牙": 1.8, "葡萄牙": 2.0, "荷兰": 1.7, "比利时": 1.6, "克罗地亚": 1.4,
-    "乌拉圭": 1.4, "墨西哥": 1.3, "美国": 1.3, "加拿大": 1.2,
-    "塞内加尔": 1.2, "摩洛哥": 1.1, "日本": 1.4, "韩国": 1.3,
-    "澳大利亚": 1.0, "伊朗": 0.9, "卡塔尔": 0.9, "沙特": 0.8,
-    "加纳": 1.0, "突尼斯": 0.8, "埃及": 1.0, "阿尔及利亚": 1.1,
-    "哥伦比亚": 1.2, "厄瓜多尔": 1.1, "巴拉圭": 0.9,
-    "瑞典": 1.1, "挪威": 1.3, "瑞士": 1.2,
-    "奥地利": 1.3, "土耳其": 1.1, "捷克": 1.1, "苏格兰": 1.0,
-    "科特迪瓦": 1.1, "南非": 0.8, "海地": 0.5, "巴拿马": 0.6,
-    "刚果": 0.8, "佛得角": 0.7, "乌兹别克": 0.7,
-    "约旦": 0.6, "伊拉克": 0.7, "新西兰": 0.7, "库拉索": 0.5, "波黑": 0.8,
-    "Argentina": 2.0, "France": 2.1, "Brazil": 2.0, "England": 1.8, "Germany": 1.9,
-    "Spain": 1.8, "Portugal": 2.0, "Netherlands": 1.7, "Belgium": 1.6, "Croatia": 1.4,
-    "Uruguay": 1.4, "Mexico": 1.3, "USA": 1.3, "Canada": 1.2,
-    "Senegal": 1.2, "Morocco": 1.1, "Japan": 1.4, "South Korea": 1.3,
-    "Australia": 1.0, "Iran": 0.9, "Qatar": 0.9, "Saudi Arabia": 0.8,
-    "Ghana": 1.0, "Tunisia": 0.8, "Egypt": 1.0, "Algeria": 1.1,
-    "Colombia": 1.2, "Ecuador": 1.1, "Paraguay": 0.9,
-    "Sweden": 1.1, "Norway": 1.3, "Switzerland": 1.2,
-    "Austria": 1.3, "Turkey": 1.1, "Czechia": 1.1, "Scotland": 1.0,
-    "Ivory Coast": 1.1, "South Africa": 0.8, "Haiti": 0.5, "Panama": 0.6,
-    "DR Congo": 0.8, "Cape Verde": 0.7, "Uzbekistan": 0.7,
-    "Jordan": 0.6, "Iraq": 0.7, "New Zealand": 0.7, "Curacao": 0.5, "Bosnia": 0.8,
-}
-
-
-# ============ ESPN API 数据获取（免费，无需 Key）============
-# 全赛程：2026-06-11 开幕 至 2026-07-19 决赛
-_ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=20260611-20260720"
-
-# 2026 世界杯 48 队中英文名 → ESPN ID 映射（完整列表，免 Key）
-_ESPN_TEAMS = {
-    "墨西哥": "203", "美国": "660", "加拿大": "206",
-    "法国": "478", "德国": "481", "巴西": "205", "阿根廷": "202",
-    "英格兰": "448", "西班牙": "164", "葡萄牙": "482", "荷兰": "449",
-    "比利时": "459", "克罗地亚": "477", "乌拉圭": "212",
-    "塞内加尔": "654", "摩洛哥": "2869", "日本": "627", "韩国": "451",
-    "澳大利亚": "628", "伊朗": "469", "卡塔尔": "4398", "沙特": "655",
-    "加纳": "4469", "突尼斯": "659", "埃及": "2620", "阿尔及利亚": "624",
-    "哥伦比亚": "208", "厄瓜多尔": "209", "巴拉圭": "210",
-    "瑞典": "466", "挪威": "464", "瑞士": "475",
-    "奥地利": "474", "土耳其": "465", "捷克": "450", "苏格兰": "580",
-    "科特迪瓦": "4789", "南非": "467", "海地": "2654", "巴拿马": "2659",
-    "刚果": "2850", "佛得角": "2597", "乌兹别克": "2570",
-    "约旦": "2917", "伊拉克": "4375", "新西兰": "2666", "库拉索": "11678",
-    "波黑": "452",
-    # 英文别名
-    "Mexico": "203", "USA": "660", "Canada": "206",
-    "France": "478", "Germany": "481", "Brazil": "205", "Argentina": "202",
-    "England": "448", "Spain": "164", "Portugal": "482", "Netherlands": "449",
-    "Belgium": "459", "Croatia": "477", "Uruguay": "212",
-    "Senegal": "654", "Morocco": "2869", "Japan": "627", "South Korea": "451",
-    "Australia": "628", "Iran": "469", "Qatar": "4398", "Saudi Arabia": "655",
-    "Ghana": "4469", "Tunisia": "659", "Egypt": "2620", "Algeria": "624",
-    "Colombia": "208", "Ecuador": "209", "Paraguay": "210",
-    "Sweden": "466", "Norway": "464", "Switzerland": "475",
-    "Austria": "474", "Turkey": "465", "Czechia": "450", "Scotland": "580",
-    "Ivory Coast": "4789", "South Africa": "467", "Haiti": "2654", "Panama": "2659",
-    "DR Congo": "2850", "Cape Verde": "2597", "Uzbekistan": "2570",
-    "Jordan": "2917", "Iraq": "4375", "New Zealand": "2666", "Curacao": "11678",
-    "Bosnia": "452",
-}
-
-
-def _parse_teams(query):
-    """从查询中提取两个队名，返回 (team1, team2) 或 (None, None)"""
-    for sep in [r'\s+vs\s+', r'\s+v\s+', r'\s+对阵\s+', r'\s+对\s+']:
-        parts = re.split(sep, query, flags=re.IGNORECASE)
-        if len(parts) == 2:
-            left = [w for w in parts[0].split() if re.search(r'[一-鿿]|[a-zA-Z]', w)]
-            righ = [w for w in parts[1].split() if re.search(r'[一-鿿]|[a-zA-Z]', w)]
-            if left and righ:
-                t1, t2 = left[-1], righ[0]
-                if t1 != t2:
-                    return t1, t2
-    return None, None
-
-
-def _try_espn_date(team1_name, team2_name):
-    """从 ESPN API 提取比赛日期，成功返回 'YYYY-MM-DD HH:MM'，失败返回 ''"""
-    try:
-        t1_id = _ESPN_TEAMS.get(team1_name)
-        t2_id = _ESPN_TEAMS.get(team2_name)
-        if not t1_id or not t2_id:
-            return ""
-        resp = requests.get(_ESPN_SCOREBOARD, timeout=5)
-        data = resp.json()
-        for ev in data.get("events", []):
-            c = ev["competitions"][0]
-            c1 = str(c["competitors"][0]["id"])
-            c2 = str(c["competitors"][1]["id"])
-            if (c1 == t1_id and c2 == t2_id) or (c1 == t2_id and c2 == t1_id):
-                raw_date = ev.get("date", "")
-                if raw_date:
-                    return raw_date[:16].replace("T", " ")
-                break
-    except Exception:
-        pass
-    return ""
-
-
-def _try_espn_api(match_query, search_mode):
-    """从 ESPN API 免费获取世界杯数据。成功返回格式化文本，失败返回空字符串。"""
-    t1_name, t2_name = _parse_teams(match_query)
-    if not t1_name or not t2_name:
-        return ""
-
-    t1_id = _ESPN_TEAMS.get(t1_name)
-    t2_id = _ESPN_TEAMS.get(t2_name)
-    if not t1_id or not t2_id:
-        return ""
-
-    try:
-        resp = requests.get(_ESPN_SCOREBOARD, timeout=10)
-        data = resp.json()
-
-        fixture = None
-        for ev in data.get("events", []):
-            comp = ev["competitions"][0]
-            c1 = str(comp["competitors"][0]["id"])
-            c2 = str(comp["competitors"][1]["id"])
-            if (c1 == t1_id and c2 == t2_id) or (c1 == t2_id and c2 == t1_id):
-                fixture = ev
-                break
-
-        if not fixture:
-            return ""
-
-        c = fixture["competitions"][0]
-        h = c["competitors"][0]
-        a = c["competitors"][1]
-        venue = fixture.get("venue", {})
-        status = fixture["status"]["type"]
-
-        lines = []
-        lines.append(f"赛事: FIFA World Cup 2026 | {fixture.get('season', {}).get('slug', '')}")
-        lines.append(f"对阵: {h['team']['displayName']} vs {a['team']['displayName']}")
-        lines.append(f"日期: {fixture['date'][:10]} | 场地: {venue.get('displayName', '?')}, {venue.get('address', {}).get('city', '?')}")
-        lines.append(f"状态: {status['description']} ({status.get('shortDetail', '')})")
-
-        # 比分
-        if h.get("score") is not None and a.get("score") is not None:
-            lines.append(f"比分: {h['team']['displayName']} {h['score']} - {a['score']} {a['team']['displayName']}")
-
-        # 赔率
-        odds = c.get("odds", [{}])[0]
-        if odds and odds.get("provider"):
-            lines.append(f"赔率 ({odds['provider'].get('name', '?')}): {odds.get('details', '?')}")
-            draw = odds.get("drawOdds", {}) or {}
-            if draw.get("moneyLine"):
-                lines.append(f"  平局赔率: {draw['moneyLine']}")
-
-        # 积分榜战绩
-        for side, competitor in [("H", h), ("A", a)]:
-            records = competitor.get("records", [])
-            if records:
-                r = records[0]
-                lines.append(f"  战绩 {competitor['team']['displayName']}: {r.get('summary', '?')} (W-D-L)")
-
-        # 赛后统计和事件
-        if search_mode == "post_match" or status.get("state") == "post":
-            # 比赛事件
-            details = c.get("details", [])
-            if details:
-                lines.append(f"\n比赛事件:")
-                for d in details:
-                    clock = d.get("clock", {}).get("displayValue", "?")
-                    typ = d.get("type", {}).get("text", "?")
-                    side_tag = "H" if str(d.get("team", {}).get("id", "")) == str(h["id"]) else "A"
-                    players = d.get("athletesInvolved", [])
-                    pname = players[0].get("displayName", "") if players else ""
-                    score_val = f" [{d['scoreValue']}]" if d.get("scoreValue") else ""
-                    match d.get("type", {}).get("id", ""):
-                        case "70" | "137":  # Goal
-                            lines.append(f"  {clock} ⚽ {pname} ({side_tag}){score_val}")
-                        case "94":  # Yellow
-                            lines.append(f"  {clock} 🟨 {pname} ({side_tag})")
-                        case "93":  # Red
-                            lines.append(f"  {clock} 🟥 {pname} ({side_tag})")
-
-            # 技术统计
-            h_stats = {s["name"]: s["displayValue"] for s in h.get("statistics", [])}
-            a_stats = {s["name"]: s["displayValue"] for s in a.get("statistics", [])}
-            if h_stats:
-                lines.append(f"\n技术统计:")
-                stat_names = ["possessionPct", "totalShots", "shotsOnTarget", "wonCorners",
-                              "foulsCommitted", "goalAssists"]
-                stat_labels = {"possessionPct": "控球率 %", "totalShots": "总射门", "shotsOnTarget": "射正",
-                               "wonCorners": "角球", "foulsCommitted": "犯规", "goalAssists": "助攻"}
-                for sname in stat_names:
-                    hv = h_stats.get(sname, "?")
-                    av = a_stats.get(sname, "?")
-                    label = stat_labels.get(sname, sname)
-                    lines.append(f"  {label}: {hv} vs {av}")
-
-        # 分组积分榜
-        resp_table = requests.get(
-            "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/standings",
-            timeout=10
-        )
-        groups = resp_table.json().get("children", [])
-        for grp in groups:
-            for row in grp.get("standings", {}).get("entries", []):
-                tid = str(row.get("team", {}).get("id", ""))
-                if tid in (t1_id, t2_id):
-                    stats = row.get("stats", [])
-                    if len(stats) >= 6:
-                        lines.append(f"  积分榜 {row['team']['displayName']}: "
-                                     f"排名{stats[8].get('value','?') if len(stats)>8 else '?'} | "
-                                     f"赛{stats[0].get('value','?')} "
-                                     f"胜{stats[1].get('value','?')} "
-                                     f"平{stats[2].get('value','?')} "
-                                     f"负{stats[3].get('value','?')} | "
-                                     f"进球{stats[4].get('value','?')} "
-                                     f"失球{stats[5].get('value','?')} "
-                                     f"净胜{stats[6].get('value','?')} "
-                                     f"积分{stats[7].get('value','?')}")
-
-        lines.insert(0, "[数据来源: ESPN API (免费)]")
-        return "\n".join(lines)
-
-    except Exception:
-        return ""
-
-
-# ============ Tavily 搜索（回退方案）============
+# ============ Tavily 搜索（所有数据来源）============
 def _tavily_search(query):
     """Tavily 搜索，返回格式化结果"""
     try:
@@ -1196,57 +942,24 @@ def _search_with_tavily(system_prompt, user_query, search_mode="pre_match", mode
 
 
 # ============ 统一搜索入口 ============
+
 def call_deepseek(system_prompt, user_query, enable_search=False, search_mode="pre_match", model=None):
-    """调用 DeepSeek API。
-    enable_search=True 时：ESPN API → Tavily 二级回退。
-    search_mode: "pre_match" 或 "post_match"
-    model: 覆盖默认模型选择
-    """
+    """调用 DeepSeek API。enable_search=True 时 Tavily 搜索 + 汇总"""
     if not API_KEY:
         st.error("API Key 未配置，请联系 UP 主。")
         return ""
-
     if not enable_search:
         return _deepseek_chat(system_prompt, user_query, model=model)
-
-    # Tier 1: ESPN API (硬数据: 比分/统计/赔率/积分榜/球场)
-    espn_data = _try_espn_api(user_query, search_mode)
-
-    # Tier 2: Tavily (软数据: 阵容/教练发言/伤情/裁判)
-    # ESPN 命中时补缺，未命中时独扛
-    if espn_data:
-        tavily_data = _search_with_tavily(system_prompt, user_query, search_mode, model=model)
-        if tavily_data:
-            # 合并：ESPN 硬数据为主，Tavily 补充软信息
-            return _deepseek_chat(
-                system_prompt,
-                f"{user_query}\n\n"
-                f"**【硬性约束】ESPN API 已确认以下事实，不得覆盖：**\n{espn_data}\n\n"
-                f"**【参考】Tavily 搜索结果（用于补充阵容/教练/伤情/裁判）：**\n{tavily_data}\n\n"
-                f"**综合以上两份数据生成报告。ESPN 有数据的字段以 ESPN 为准。ESPN 没有的字段从 Tavily 获取。都不要编造。**",
-                model=model
-            )
-        return _deepseek_chat(
-            system_prompt,
-            f"{user_query}\n\n"
-            f"**【硬性约束】ESPN API 已确认以下事实，不得覆盖：**\n{espn_data}\n\n"
-            f"**ESPN 未提供的字段（阵容/教练/裁判）如果搜索不到，标注「暂无」，不要从训练数据推测。**",
-            model=model
-        )
-
-    # ESPN 未命中 — Tavily 独扛
     result = _search_with_tavily(system_prompt, user_query, search_mode, model=model)
     if result:
         return result
-
-    # Tier 3: 纯模型知识（最后手段）
     return _deepseek_chat(
         system_prompt,
-        "[数据源均不可用] 请利用你的训练数据回答以下问题。不确定处标注\"基于历史数据推测\"。\n\n" + user_query,
+        "[数据源不可用] 利用训练数据回答，不确定标注暂无。\n\n" + user_query,
         model=model
     )
 
-# ============ 历史记录管理 ============
+
 def save_record(match, search_report, analysis_report):
     match_time = extract_match_time(search_report)
     is_training = st.session_state.get("training_mode", False)
@@ -1538,18 +1251,7 @@ def ignore_modified_law(mod, record_id):
 
 # ============ 主界面 ============
 st.title("⚽ 全维推演工厂 V2.6")
-
-# 从中英文映射表中提取中文队名，去重排序
-_CN_TEAMS = [""] + sorted({k for k in _ESPN_TEAMS if re.search(r'[一-鿿]', k)})
-c1, c2, c3 = st.columns([2, 1, 2])
-with c1:
-    team1 = st.selectbox("选择球队", _CN_TEAMS, format_func=lambda x: "请选择..." if x == "" else x, key="team1")
-with c2:
-    st.markdown("<h2 style='text-align:center;margin-top:0.5em'>vs</h2>", unsafe_allow_html=True)
-with c3:
-    team2 = st.selectbox("选择球队", _CN_TEAMS, format_func=lambda x: "请选择..." if x == "" else x, key="team2")
-
-match = f"{team1} vs {team2}" if team1 and team2 else ""
+match = st.text_input("输入比赛对阵（例如：法国 vs 塞内加尔）", placeholder="法国 vs 塞内加尔")
 
 # 训练模式：用于已结束的历史比赛，跳过时间锁，可直接校准
 training_mode = st.checkbox(
@@ -1589,21 +1291,15 @@ with col1:
                     st.session_state.search_report = result
                     st.session_state.current_match = match
 
-                    # 优先 ESPN 结构化日期，再回退文本提取
-                    espn_date = _try_espn_date(team1, team2)
-                    if espn_date:
-                        st.session_state.current_match_time = espn_date
-                        st.success(f"✅ 开赛时间：{espn_date} (ESPN)")
+                    extracted_time = extract_match_time(result)
+                    if extracted_time:
+                        st.session_state.current_match_time = extracted_time
+                        st.success(f"✅ 开赛时间：{extracted_time}")
+                    elif training_mode:
+                        st.session_state.current_match_time = "2000-01-01 00:00"
+                        st.info("ℹ️ 训练模式：已跳过时间校验，可直接校准。")
                     else:
-                        extracted_time = extract_match_time(result)
-                        if extracted_time:
-                            st.session_state.current_match_time = extracted_time
-                            st.success(f"✅ 开赛时间：{extracted_time}")
-                        elif training_mode:
-                            st.session_state.current_match_time = "2000-01-01 00:00"
-                            st.info("ℹ️ 训练模式：已跳过时间校验，可直接校准。")
-                        else:
-                            st.info("ℹ️ 未提取到开赛时间，赛后校准将需要手动确认。")
+                        st.info("ℹ️ 未提取到开赛时间，赛后校准将需要手动确认。")
         else:
             st.warning("请先输入比赛名称")
 
@@ -1646,27 +1342,22 @@ with col2:
                         odds = (oh, od, oa)
                 except Exception:
                     pass
-                # λ 初始值：优先队名查表 → AI 提取值（仅当 >0.5）→ 兜底 1.3
-                home_team_name = params.get("home_team", "") or team1
-                away_team_name = params.get("away_team", "") or team2
-                h_lam_table = _DEFAULT_LAM.get(home_team_name, 1.3)
-                a_lam_table = _DEFAULT_LAM.get(away_team_name, 1.2)
-                h_lam_ai = _f("lam_h_initial", h_lam_table)
-                a_lam_ai = _f("lam_a_initial", a_lam_table)
-                # 拒绝 AI 的荒谬值（< 0.8 或 > 4.0 必定是提取错误）
-                h_lam_ai = h_lam_ai if 0.8 <= h_lam_ai <= 4.0 else h_lam_table
-                a_lam_ai = a_lam_ai if 0.8 <= a_lam_ai <= 4.0 else a_lam_table
+                # λ 初始值：AI 提取 + clamp 检测
+                h_lam_ai = _f("lam_h_initial", 1.5)
+                a_lam_ai = _f("lam_a_initial", 1.2)
+                h_lam_ai = h_lam_ai if 0.3 <= h_lam_ai <= 4.0 else 1.5
+                a_lam_ai = a_lam_ai if 0.3 <= a_lam_ai <= 4.0 else 1.2
 
                 # 硬门槛：修正后的有效 λ 不得低于 0.3
                 test_h = mod.apply(h_lam_ai, is_home=True)
                 test_a = mod.apply(a_lam_ai, is_home=False)
                 if test_h < 0.3 or test_a < 0.3:
                     mod = LambdaModifiers(home_adv=1.08 if params.get("home_adv", False) else 1.0)
-                    h_lam_ai, a_lam_ai = h_lam_table, a_lam_table
-                    st.warning("AI 修正因子异常，已回退到队名基准值。可通过校准反馈修正。")
+                    h_lam_ai, a_lam_ai = 1.5, 1.2
+                    st.warning("AI 修正因子异常，已恢复默认 λ 值。可通过校准反馈修正。")
 
                 pred = predict_match(
-                    home=home_team_name, away=away_team_name,
+                    home=params.get("home_team", ""), away=params.get("away_team", ""),
                     lam_h0=h_lam_ai, lam_a0=a_lam_ai, mod=mod,
                     odds=odds,
                     lam_c=_f("lam_c", 0.02),
