@@ -306,6 +306,33 @@ def _upgrade_all_laws():
 
 
 st.sidebar.markdown("---")
+st.sidebar.markdown("### 🎚️ 定律激进程度")
+
+if "law_aggressiveness" not in st.session_state:
+    st.session_state["law_aggressiveness"] = 1.0
+
+law_aggressiveness = st.sidebar.slider(
+    "修正因子强度",
+    min_value=0.5, max_value=1.5, value=1.0, step=0.05,
+    help="1.0 = 标准 | <1.0 = 偏保守（因子趋近 1.0）| >1.0 = 偏激进（因子放大）"
+)
+st.session_state["law_aggressiveness"] = law_aggressiveness
+if law_aggressiveness != 1.0:
+    label = "保守" if law_aggressiveness < 1.0 else "激进"
+    st.sidebar.caption(f"当前: {label}模式 (×{law_aggressiveness:.2f})")
+
+# ---- 管理工具 ----
+def _reset_user_laws():
+    """删除当前用户所有定律，从 admin 模板重建"""
+    try:
+        supabase.table("laws").delete().eq("username", st.session_state.username).execute()
+        initialize_laws_for_user(st.session_state.username)
+        return True
+    except Exception as e:
+        st.error(f"重置失败: {e}")
+        return False
+
+
 with st.sidebar.expander("🛠️ 管理工具", expanded=False):
     if st.button("🔄 一键升级定律库", use_container_width=True,
                  help="为每条定律添加 modifier_map 字段，兼容新数学引擎"):
@@ -314,6 +341,15 @@ with st.sidebar.expander("🛠️ 管理工具", expanded=False):
             if count >= 0:
                 st.success(f"已为 {count} 条定律添加 modifier_map。")
                 st.info("定律库现已兼容新数学引擎。")
+                st.rerun()
+
+    st.markdown("---")
+    if st.button("🔁 重置我的定律库", use_container_width=True,
+                 help="清除你的所有私人定律，从管理员模板重新复制一份"):
+        st.warning("你确定要重置吗？你的私人定律和修改将丢失，恢复为 admin 的默认定律。")
+        if st.button("✅ 确认重置", key="confirm_reset_my_laws", use_container_width=True):
+            if _reset_user_laws():
+                st.success("已重置。")
                 st.rerun()
 
 # 用户自定义 Key 优先，否则用 UP 主共享 Key
@@ -750,13 +786,26 @@ def _laws_to_modifiers(search_report: str, laws: list) -> dict:
         m = re.search(r'\{[\s\S]*\}', content)
         if m:
             result = json.loads(m.group())
-            # 展示触发的定律（兼容新旧两种格式）
-            triggered = result.get("triggered", [])  # 新格式: string列表
+            # 用户设定的激进程度：拉向或推离 1.0
+            aggro = st.session_state.get("law_aggressiveness", 1.0)
+            merged = result.get("merged_modifiers", {})
+            if merged and aggro != 1.0:
+                adj = {}
+                for k, v in merged.items():
+                    try:
+                        v = float(v)
+                        adj[k] = round(1.0 + (v - 1.0) * aggro, 3)
+                    except Exception:
+                        adj[k] = v
+                result["merged_modifiers"] = adj
+            # 展示触发的定律
+            triggered = result.get("triggered", [])
             if not triggered:
-                law_effects = result.get("law_effects", [])  # 旧格式: 对象数组
+                law_effects = result.get("law_effects", [])
                 triggered = [e.get("law_name", "") for e in law_effects if e.get("applies")]
             if triggered:
-                st.info(f"📋 触发 {len(triggered)}/{len(active_laws)} 条定律: {', '.join(triggered[:5])}")
+                aggro_label = f" [{'保守' if aggro < 1.0 else '激进'} ×{aggro:.1f}]" if aggro != 1.0 else ""
+                st.info(f"📋 触发 {len(triggered)}/{len(active_laws)} 条定律{aggro_label}: {', '.join(triggered[:5])}")
             return result
     except Exception:
         pass
