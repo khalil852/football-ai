@@ -912,6 +912,21 @@ _CALIBRATE_FROM_JSON_PROMPT = (
 # （旧版 _CALIBRATE_FROM_JSON_PROMPT 已移除，统一使用上方精简版）
 
 
+# ============ 工具函数：从查询提取两队名 ============
+def _parse_teams(query):
+    """从查询中提取两个队名，返回 (team1, team2) 或 (None, None)"""
+    for sep in [r'\s+vs\s+', r'\s+v\s+', r'\s+对阵\s+', r'\s+对\s+']:
+        parts = re.split(sep, query, flags=re.IGNORECASE)
+        if len(parts) == 2:
+            left = [w for w in parts[0].split() if re.search(r'[一-鿿]|[a-zA-Z]', w)]
+            righ = [w for w in parts[1].split() if re.search(r'[一-鿿]|[a-zA-Z]', w)]
+            if left and righ:
+                t1, t2 = left[-1], righ[0]
+                if t1 != t2:
+                    return t1, t2
+    return None, None
+
+
 # ============ Tavily 搜索（所有数据来源）============
 def _tavily_search(query):
     """Tavily 搜索，返回格式化结果"""
