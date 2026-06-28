@@ -759,7 +759,7 @@ def _laws_to_modifiers(search_report: str, laws: list) -> dict:
             "messages": [
                 {"role": "system", "content": system_msg},
                 {"role": "user",
-                 "content": f"## 赛前数据报告\n{search_report[:6000]}\n\n## 定律库\n{laws_json}"}
+                 "content": f"## 赛前数据报告\n{search_report[:8000]}\n\n## 定律库\n{laws_json}"}
             ],
         })
         resp = requests.post(
@@ -1127,7 +1127,7 @@ def _tavily_search(query):
         results = []
         for item in data.get("results", []):
             content = item.get("content", "")
-            if len(content) > 20:
+            if len(content) > 10:  # 降低门槛，保留有用短数据
                 results.append(f"- {item.get('title', '')}: {content}")
         return "\n".join(results) if results else "搜索未返回有效结果。"
     except Exception as e:
@@ -1152,14 +1152,15 @@ def _search_with_tavily(system_prompt, user_query, search_mode="pre_match", mode
 
     if search_mode == "pre_match":
         search_rounds = [
-            f"{search_target} 首发阵容 伤病 历史交锋",
-            f"{search_target} 赔率 裁判 赛前新闻 教练发言",
+            f'"{search_target}" predicted lineup injuries 2026 World Cup',
+            f"{search_target} coach press conference referee appointment 2026",
+            f'"{search_target}" odds betting preview head-to-head history',
         ]
     else:
         search_rounds = [
-            f'"{search_target}" final score result goalscorers',
-            f"{search_target} 最終比分 进球者 赛后技术统计",
-            f'"{search_target}" match report statistics',
+            f'"{search_target}" final score result goalscorers match report',
+            f"{search_target} 最终比分 进球者 赛后技术统计 射门 控球",
+            f'"{search_target}" coach reaction referee decisions key events 2026',
         ]
 
     all_results = ""
@@ -1703,7 +1704,7 @@ with col2:
                 }, ensure_ascii=False, indent=2)
 
                 analysis_query = (
-                    f"赛前数据报告:\n{st.session_state.search_report[:6000]}\n\n"
+                    f"赛前数据报告:\n{st.session_state.search_report[:8000]}\n\n"
                     f"数学模型计算结果 (Python 引擎):\n{math_json}\n\n"
                     f"**【最高优先级】报告中必须使用以上「锁定比分」字段的值作为最终推演比分。"
                     f"你不得修改、重新计算、或给出任何其他比分预测。**\n"
