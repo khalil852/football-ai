@@ -1131,7 +1131,7 @@ def calibrate_record(record, max_attempts=3):
 {post_match_data[:6000]}
 
 ## 赛前推演
-推演比分: {pred.locked_h}-{pred.locked_a}
+推演比分: {f'{pred.locked_h}-{pred.locked_a}' if pred else '暂无数学推演'}
 {record['analysis_report'][:4000]}
 {math_block}
 
