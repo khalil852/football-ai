@@ -607,6 +607,10 @@ class MatchPrediction:
     away_advance: float = 0.0   # 客队最终晋级概率
     extra_time_pct: float = 0.0  # 进入加时的概率
     penalties_pct: float = 0.0   # 进入点球的概率
+    et_score_h: int = 0          # 加时赛主队进球
+    et_score_a: int = 0          # 加时赛客队进球
+    pen_score_h: int = 0         # 点球主队进球
+    pen_score_a: int = 0         # 点球客队进球
 
 
 @dataclass
@@ -686,20 +690,44 @@ def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
     # ---- 淘汰赛加时+点球推演 ----
     home_adv = hw; away_adv = aw
     extra_time_pct = 0.0; penalties_pct = 0.0
-    # 仅当 90 分钟推演为平局时触发加时模式
+    et_score_h, et_score_a = 0, 0       # 加时赛比分
+    pen_score_h, pen_score_a = 0, 0       # 点球比分
+    et_winner = ""                         # 加时赛胜方
+    pen_winner = ""                        # 点球胜方
     draw_at_90 = (locked_h == locked_a)
 
     if is_knockout and draw_at_90:
-        # 加时赛中，强队略微占优（体能/板凳深度），lambda 比 → 加时胜率偏差
         lam_ratio = min(max(lh / (la + 0.01), 0.6), 1.6)
-        et_home_bias = 0.5 + 0.1 * math.log(lam_ratio)
-        extra_time_pct = dw  # 推演到平局 → 100% 进入加时
-        extra_resolve = dw * 0.65  # 加时中 65% 分出胜负
-        penalties_pct = dw * 0.35  # 加时中 35% 进入点球
+        extra_time_pct = dw  # 100% 进入加时
+        extra_resolve = dw * 0.65  # 65% 加时分胜负
+        penalties_pct = dw * 0.35  # 35% 点球
 
-        # 点球大战：基础 50/50，lambda 比给 ±8% 偏差
+        # ---- 加时赛推演 ----
+        et_lam_h = lh * 0.33   # 30 分钟 ≈ 90 分钟的 1/3
+        et_lam_a = la * 0.33
+        et_probs = _bivariate_poisson(et_lam_h, et_lam_a, lam_c, max_g=4)
+        et_hw = et_dw = et_aw = 0.0
+        et_top = []
+        for (h, a), p in et_probs.items():
+            if h > a: et_hw += p
+            elif h == a: et_dw += p
+            else: et_aw += p
+        et_top = sorted(et_probs.items(), key=lambda x: x[1], reverse=True)[:3]
+        if et_top:
+            et_score_h, et_score_a = et_top[0][0]
+        et_home_bias = et_hw / (et_hw + et_aw + 0.01)  # 加时赛胜率偏差
+        et_winner = "主" if et_home_bias > 0.5 else "客"
+
+        # ---- 点球大战推演 ----
+        # 点球比分：模拟 5 轮 → 常见比分 5-4 / 4-3 / 3-2
         pen_home_bias = 0.5 + 0.08 * math.log(lam_ratio)
         pen_away_bias = 1.0 - pen_home_bias
+        if pen_home_bias > 0.55:
+            pen_score_h, pen_score_a = 5, 4
+        elif pen_home_bias < 0.45:
+            pen_score_h, pen_score_a = 4, 5
+        else:
+            pen_score_h, pen_score_a = 4, 4  # 平局 sudden death 可能
 
         home_adv = hw + extra_resolve * et_home_bias + penalties_pct * pen_home_bias
         away_adv = aw + extra_resolve * (1 - et_home_bias) + penalties_pct * pen_away_bias
@@ -720,7 +748,9 @@ def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
                            locked_h=locked_h, locked_a=locked_a,
                            is_knockout=is_knockout,
                            home_advance=home_adv, away_advance=away_adv,
-                           extra_time_pct=extra_time_pct, penalties_pct=penalties_pct)
+                           extra_time_pct=extra_time_pct, penalties_pct=penalties_pct,
+                           et_score_h=et_score_h, et_score_a=et_score_a,
+                           pen_score_h=pen_score_h, pen_score_a=pen_score_a)
 
 
 # ---- 赛后校准 ----
@@ -898,8 +928,12 @@ _ANALYSIS_FROM_JSON_PROMPT = (
     "- 不要写「我认为」「分析师判断」等主观表述\n"
     "- 报告结构如下（总分不超过 400 字）:\n"
     "\n"
-    "### 🎯 推演比分\n"
-    "**X - Y**  (主队在前, 90分钟常规时间内)\n"
+    "### 🎯 推演比分 (90分钟)\n"
+    "**X - Y**\n"
+    "\n"
+    "[如果是淘汰赛且90分钟平局，必须增加一行:]\n"
+    "### ⏱ 加时赛 & 点球\n"
+    "**加时 X-Y** | **点球 X-Y**\n"
     "\n"
     "## 教练意图评级\n"
     "| 球队 | 评级 | 依据 |\n"
@@ -1231,10 +1265,10 @@ def calibrate_record(record, max_attempts=3):
                 pred_home_adv = pred.home_advance > 0.5
                 adv_hit = "是" if actual_home_adv == pred_home_adv else "否"
                 math_block += (
-                    f"【淘汰赛】推演平局 → 加时/点球晋级概率:\n"
-                    f"  推演晋级: {pred.home_advance*100:.0f}%/{pred.away_advance*100:.0f}%\n"
-                    f"  实际晋级: {actual_home_adv}{pen_msg} | 加时 {pred.extra_time_pct*100:.1f}% | 点球 {pred.penalties_pct*100:.1f}%\n"
-                    f"  晋级预测命中: {adv_hit}\n"
+                    f"【淘汰赛】推演平局 → 加时/点球:\n"
+                    f"  推演加时比分: {pred.et_score_h}-{pred.et_score_a} | 点球: {pred.pen_score_h}-{pred.pen_score_a}\n"
+                    f"  晋级概率: {pred.home_advance*100:.0f}%/{pred.away_advance*100:.0f}%\n"
+                    f"  实际晋级: {actual_home_adv}{pen_msg} | 晋级预测命中: {adv_hit}\n"
                 )
             else:
                 # 推演 90 分钟分出胜负 → 无加时推演
@@ -1582,8 +1616,9 @@ with col2:
                 ko_msg = ""
                 if is_knockout:
                     if pred.locked_h == pred.locked_a:
-                        ko_msg = (f" | 晋级: {pred.home_advance*100:.0f}%/{pred.away_advance*100:.0f}% | "
-                                  f"加时 {pred.extra_time_pct*100:.1f}% | 点球 {pred.penalties_pct*100:.1f}%")
+                        ko_msg = (f" | 加时推演: {pred.et_score_h}-{pred.et_score_a} | "
+                                  f"点球: {pred.pen_score_h}-{pred.pen_score_a} | "
+                                  f"晋级: {pred.home_advance*100:.0f}%/{pred.away_advance*100:.0f}%")
                     else:
                         winner = pred.home_team if pred.locked_h > pred.locked_a else pred.away_team
                         ko_msg = f" | 90分钟决胜 ({winner})"
@@ -1608,27 +1643,29 @@ with col2:
                 if is_knockout:
                     if pred.locked_h == pred.locked_a:
                         extra_fields = {
-                            "比赛类型": "淘汰赛 — 推演平局，需要加时",
-                            "主队晋级概率": f"{pred.home_advance*100:.1f}%",
-                            "客队晋级概率": f"{pred.away_advance*100:.1f}%",
-                            "加时概率": f"{pred.extra_time_pct*100:.1f}%",
-                            "点球概率": f"{pred.penalties_pct*100:.1f}%",
+                            "比赛类型": "淘汰赛 — 90分钟推演平局，须加时",
+                            "90分钟": f"{pred.locked_h}-{pred.locked_a}",
+                            "加时赛比分": f"{pred.et_score_h}-{pred.et_score_a}",
+                            "点球比分": f"{pred.pen_score_h}-{pred.pen_score_a}",
+                            "主队晋级": f"{pred.home_advance*100:.1f}%",
+                            "客队晋级": f"{pred.away_advance*100:.1f}%",
                         }
                         knockout_plan = (
                             f"**【淘汰赛特殊要求】**\n"
-                            f"推演 90 分钟结果为平局，必须推演加时赛和点球大战。\n"
-                            f"主队晋级概率为 {pred.home_advance*100:.1f}%，客队晋级概率为 {pred.away_advance*100:.1f}%。\n"
-                            f"加时概率 {pred.extra_time_pct*100:.1f}%，点球概率 {pred.penalties_pct*100:.1f}%。\n\n"
+                            f"推演 90 分钟为平局，已推演加时赛比分 ({pred.et_score_h}-{pred.et_score_a}) 和点球比分 ({pred.pen_score_h}-{pred.pen_score_a})。\n"
+                            f"晋级概率：主队 {pred.home_advance*100:.1f}%，客队 {pred.away_advance*100:.1f}%。\n"
+                            f"加时胜方概率 {pred.extra_time_pct*100:.1f}%，点球概率 {pred.penalties_pct*100:.1f}%。\n\n"
                         )
                     else:
+                        winner = pred.home_team if pred.locked_h > pred.locked_a else pred.away_team
                         extra_fields = {
-                            "比赛类型": "淘汰赛 — 推演 90 分钟分出胜负",
-                            "推演胜方": pred.home_team if pred.locked_h > pred.locked_a else pred.away_team,
+                            "比赛类型": "淘汰赛 — 90分钟分出胜负",
+                            "推演胜方": winner,
                             "不需加时": True,
                         }
                         knockout_plan = (
                             f"**【淘汰赛】**\n"
-                            f"推演 90 分钟结果为 {pred.locked_h}-{pred.locked_a}，已分出胜负，不需推演加时赛。\n\n"
+                            f"推演 90 分钟结果为 {pred.locked_h}-{pred.locked_a}，{winner} 胜，不需加时。\n\n"
                         )
                 math_json = json.dumps({
                     "锁定比分": f"{pred.locked_h}-{pred.locked_a} (90分钟常规时间)",
