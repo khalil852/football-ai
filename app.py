@@ -734,6 +734,7 @@ def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
             # 极度均衡 → sudden death 任意一边
             pen_score_h, pen_score_a = 6, 5 if pen_home_bias > 0.50 else (5, 6)
 
+        pen_away_bias = 1.0 - pen_home_bias
         home_adv = hw + extra_resolve * et_home_bias + penalties_pct * pen_home_bias
         away_adv = aw + extra_resolve * (1 - et_home_bias) + penalties_pct * pen_away_bias
     else:
