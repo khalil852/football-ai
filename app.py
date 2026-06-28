@@ -928,12 +928,18 @@ _ANALYSIS_FROM_JSON_PROMPT = (
     "- 不要写「我认为」「分析师判断」等主观表述\n"
     "- 报告结构如下（总分不超过 400 字）:\n"
     "\n"
-    "### 🎯 推演比分 (90分钟)\n"
-    "**X - Y**\n"
+    "### 🎯 推演比分\n"
+    "**主场 X - Y 客场**\n"
     "\n"
-    "[如果是淘汰赛且90分钟平局，必须增加一行:]\n"
-    "### ⏱ 加时赛 & 点球\n"
-    "**加时 X-Y** | **点球 X-Y**\n"
+    "[如果是淘汰赛且推演平局，必须在90分钟比分下方增加:]\n"
+    "### ⏱ 加时赛\n"
+    "**X - Y**\n"
+    "[如果加时赛仍是平局，继续增加:]\n"
+    "### 🎯 点球大战\n"
+    "**X - Y (点球比分，如 4-3)**\n"
+    "[最后一行:]\n"
+    "### 🏆 最终晋级\n"
+    "**[球队名] 晋级** (具体过程: 90分钟 X-Y, 加时 X-Y, 点球 X-Y)\n"
     "\n"
     "## 教练意图评级\n"
     "| 球队 | 评级 | 依据 |\n"
@@ -1264,10 +1270,14 @@ def calibrate_record(record, max_attempts=3):
                 # 推演为平局 → 走过加时/点球推演
                 pred_home_adv = pred.home_advance > 0.5
                 adv_hit = "是" if actual_home_adv == pred_home_adv else "否"
+                et_draw = (pred.et_score_h == pred.et_score_a)
+                fw = pred.home_team if pred.home_advance > 0.5 else pred.away_team
+                chain = f"90分 {pred.locked_h}-{pred.locked_a} → 加时 {pred.et_score_h}-{pred.et_score_a}"
+                if et_draw:
+                    chain += f"(平) → 点球 {pred.pen_score_h}-{pred.pen_score_a}"
+                chain += f" → {fw}晋级"
                 math_block += (
-                    f"【淘汰赛】推演平局 → 加时/点球:\n"
-                    f"  推演加时比分: {pred.et_score_h}-{pred.et_score_a} | 点球: {pred.pen_score_h}-{pred.pen_score_a}\n"
-                    f"  晋级概率: {pred.home_advance*100:.0f}%/{pred.away_advance*100:.0f}%\n"
+                    f"【淘汰赛】推演链: {chain}\n"
                     f"  实际晋级: {actual_home_adv}{pen_msg} | 晋级预测命中: {adv_hit}\n"
                 )
             else:
@@ -1616,9 +1626,16 @@ with col2:
                 ko_msg = ""
                 if is_knockout:
                     if pred.locked_h == pred.locked_a:
-                        ko_msg = (f" | 加时推演: {pred.et_score_h}-{pred.et_score_a} | "
-                                  f"点球: {pred.pen_score_h}-{pred.pen_score_a} | "
-                                  f"晋级: {pred.home_advance*100:.0f}%/{pred.away_advance*100:.0f}%")
+                        et_draw = (pred.et_score_h == pred.et_score_a)
+                        if et_draw:
+                            fw = pred.home_team if pred.pen_score_h > pred.pen_score_a else pred.away_team
+                            ko_msg = (f" | 90分 {pred.locked_h}-{pred.locked_a} → "
+                                      f"加时 {pred.et_score_h}-{pred.et_score_a}(平) → "
+                                      f"点球 {pred.pen_score_h}-{pred.pen_score_a} → {fw}晋级")
+                        else:
+                            fw = pred.home_team if pred.et_score_h > pred.et_score_a else pred.away_team
+                            ko_msg = (f" | 90分 {pred.locked_h}-{pred.locked_a} → "
+                                      f"加时 {pred.et_score_h}-{pred.et_score_a} → {fw}晋级")
                     else:
                         winner = pred.home_team if pred.locked_h > pred.locked_a else pred.away_team
                         ko_msg = f" | 90分钟决胜 ({winner})"
@@ -1642,19 +1659,34 @@ with col2:
                 knockout_plan = ""
                 if is_knockout:
                     if pred.locked_h == pred.locked_a:
+                        # 加时赛是否也推演为平局？
+                        et_is_draw = (pred.et_score_h == pred.et_score_a)
+                        # 最终胜方
+                        if et_is_draw:
+                            final_winner = pred.home_team if pred.pen_score_h > pred.pen_score_a else pred.away_team
+                            final_stage = "点球决胜"
+                        else:
+                            final_winner = pred.home_team if pred.et_score_h > pred.et_score_a else pred.away_team
+                            final_stage = "加时决胜"
+
                         extra_fields = {
-                            "比赛类型": "淘汰赛 — 90分钟推演平局，须加时",
-                            "90分钟": f"{pred.locked_h}-{pred.locked_a}",
-                            "加时赛比分": f"{pred.et_score_h}-{pred.et_score_a}",
-                            "点球比分": f"{pred.pen_score_h}-{pred.pen_score_a}",
-                            "主队晋级": f"{pred.home_advance*100:.1f}%",
-                            "客队晋级": f"{pred.away_advance*100:.1f}%",
+                            "比赛类型": "淘汰赛",
+                            "90分钟": f"{pred.locked_h}-{pred.locked_a} (平局 → 加时)",
+                            "加时赛比分": f"{pred.et_score_h}-{pred.et_score_a}" + (" (平局 → 点球)" if et_is_draw else ""),
+                            "最终胜方": f"{final_winner} ({final_stage})",
                         }
+                        if et_is_draw:
+                            extra_fields["点球比分"] = f"{pred.pen_score_h}-{pred.pen_score_a}"
+                        extra_fields["主队晋级概率"] = f"{pred.home_advance*100:.1f}%"
+                        extra_fields["客队晋级概率"] = f"{pred.away_advance*100:.1f}%"
+
+                        chain = f"90分钟 {pred.locked_h}-{pred.locked_a} → 加时 {pred.et_score_h}-{pred.et_score_a}"
+                        if et_is_draw:
+                            chain += f" (仍平) → 点球 {pred.pen_score_h}-{pred.pen_score_a} → {final_winner} 晋级"
+                        else:
+                            chain += f" → {final_winner} 晋级"
                         knockout_plan = (
-                            f"**【淘汰赛特殊要求】**\n"
-                            f"推演 90 分钟为平局，已推演加时赛比分 ({pred.et_score_h}-{pred.et_score_a}) 和点球比分 ({pred.pen_score_h}-{pred.pen_score_a})。\n"
-                            f"晋级概率：主队 {pred.home_advance*100:.1f}%，客队 {pred.away_advance*100:.1f}%。\n"
-                            f"加时胜方概率 {pred.extra_time_pct*100:.1f}%，点球概率 {pred.penalties_pct*100:.1f}%。\n\n"
+                            f"**【淘汰赛推演链】**\n{chain}\n\n"
                         )
                     else:
                         winner = pred.home_team if pred.locked_h > pred.locked_a else pred.away_team
