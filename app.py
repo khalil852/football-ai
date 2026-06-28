@@ -1062,16 +1062,58 @@ def calibrate_record(record, max_attempts=3):
     context_lines = [l.strip() for l in lines if l.strip() and len(l.strip()) > 10][:5]
     match_context = f"对阵: {match_name}\n" + ("\n".join(context_lines) if context_lines else "")
 
+    # 中文→英文队名映射（校准时需要搜英文才能命中）
+    _CALIB_TEAMS = {
+        "法国":"France","德国":"Germany","巴西":"Brazil","阿根廷":"Argentina",
+        "英格兰":"England","西班牙":"Spain","葡萄牙":"Portugal","荷兰":"Netherlands",
+        "比利时":"Belgium","克罗地亚":"Croatia","乌拉圭":"Uruguay","墨西哥":"Mexico",
+        "美国":"USA","加拿大":"Canada","塞内加尔":"Senegal","摩洛哥":"Morocco",
+        "日本":"Japan","韩国":"South Korea","澳大利亚":"Australia","伊朗":"Iran",
+        "卡塔尔":"Qatar","沙特":"Saudi Arabia","加纳":"Ghana","突尼斯":"Tunisia",
+        "埃及":"Egypt","阿尔及利亚":"Algeria","哥伦比亚":"Colombia","厄瓜多尔":"Ecuador",
+        "巴拉圭":"Paraguay","瑞典":"Sweden","挪威":"Norway","瑞士":"Switzerland",
+        "奥地利":"Austria","土耳其":"Turkey","捷克":"Czechia","苏格兰":"Scotland",
+        "科特迪瓦":"Ivory Coast","南非":"South Africa","海地":"Haiti","巴拿马":"Panama",
+        "刚果":"DR Congo","佛得角":"Cape Verde","乌兹别克":"Uzbekistan",
+        "约旦":"Jordan","伊拉克":"Iraq","新西兰":"New Zealand","库拉索":"Curacao","波黑":"Bosnia",
+    }
     for attempt in range(max_attempts):
-        search_query = (
-            f"【比赛信息】\n{match_context}\n\n"
-            f"请联网搜索 {match_name} 的赛后完整数据（最终比分、进球者、进球时间、"
-            f"射门统计、控球率、角球、红黄牌、换人、关键事件）。必须与以上比赛信息中的对阵一致。"
-        )
-        post_match_data = call_deepseek(
-            system_prompt_calibrate, search_query,
-            enable_search=True, search_mode="post_match", model=MODEL_CALIBRATE
-        )
+        # 提取中英文队名 → 统一转英文
+        teams = _parse_teams(match_name)
+        if teams and teams[0] and teams[1]:
+            en_h = _CALIB_TEAMS.get(teams[0], teams[0])
+            en_a = _CALIB_TEAMS.get(teams[1], teams[1])
+            clean_target = f"{en_h} vs {en_a}"
+        else:
+            clean_target = match_name
+        search_rounds = [
+            f'"{clean_target}" final score result goalscorers match report 2026',
+            f'"{clean_target}" match statistics possession shots cards',
+            f"{clean_target} 最终比分 进球者 赛后技术统计 2026",
+        ]
+        raw_search = ""
+        for q in search_rounds:
+            r = _tavily_search(q)
+            if r and "搜索未返回有效结果" not in r and "搜索失败" not in r:
+                raw_search += r + "\n"
+
+        if not raw_search:
+            if attempt < max_attempts - 1:
+                continue
+            # 最后一次：模型知识兜底
+            post_match_data = _deepseek_chat(
+                system_prompt_calibrate,
+                f"**【硬性规则】{match_name} 是已结束的比赛。直接给出最终比分、进球者、关键事件。**",
+                model=MODEL_CALIBRATE,
+            )
+            if "比赛尚未开始" in post_match_data:
+                return False, post_match_data, [], []
+        else:
+            post_match_data = _deepseek_chat(
+                system_prompt_calibrate,
+                f"以下是为 {clean_target} 搜索到的赛后数据，请汇总成报告。\n\n{raw_search}\n\n{match_context}",
+                model=MODEL_CALIBRATE,
+            )
         if not any(kw in post_match_data for kw in [
             "比赛尚未开始", "赛后数据未更新", "未返回有效结果", "搜索失败", "无法找到"
         ]):
