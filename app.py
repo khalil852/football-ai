@@ -805,20 +805,29 @@ def _extract_params(search_report: str, laws: list = None) -> dict:
     return {}
 
 
-# ---- 推演报告 prompt（硬约束：不得修改数学引擎的输出）----
+# ---- 推演报告 prompt（教练意图 L1-L5 必须是第一步）----
 _ANALYSIS_FROM_JSON_PROMPT = (
     "将 Python 数学引擎计算结果格式化为推演报告。\n"
     "**硬性规则**\n"
     "- 锁定比分必须原样引用 JSON 的「锁定比分」字段，一字不改\n"
     "- 期望进球、胜负概率也直接引用 JSON 数值\n"
     "- 不要写「我认为」「分析师判断」等主观表述\n"
-    "- 报告结构如下（总分不超过 250 字）:\n"
+    "- 报告结构如下（总分不超过 400 字）:\n"
     "\n"
     "### 🎯 推演比分\n"
     "**X - Y**  (主队在前)\n"
     "\n"
-    "### ⏱ 关键时间\n"
-    "[上半场/下半场/补时等关键进球时段，基于期望进球和修正因子判断]\n"
+    "## 教练意图评级\n"
+    "| 球队 | 评级 | 依据 |\n"
+    "|------|------|------|\n"
+    "| 主队 | L1-L5 | 基于赛前发言和首发阵容, 用1句话写明理由 |\n"
+    "| 客队 | L1-L5 | 同上 |\n\n"
+    "L1=极度保守/轮换替补 | L2=谨慎防守反击 | L3=均衡 | "
+    "L4=主动进攻 | L5=全力压上/生死战\n"
+    "⚠️ 必须从赛前数据报告中的「教练发言」和「首发阵容」找到依据, 找不到则标 L3\n"
+    "\n"
+    "### ⏱ 关键时间窗口\n"
+    "[基于双方教练意图和战术体系, 推演最可能进球的时间段]\n"
     "\n"
     "### 概率\n"
     "主胜 X% | 平 X% | 客胜 X% | 置信度 X%\n"
@@ -829,7 +838,7 @@ _ANALYSIS_FROM_JSON_PROMPT = (
     "<details><summary>📊 完整数据</summary>\n"
     "修正因子: [key=value 列表]\n"
     "比分概率: [top5 列表]\n"
-    "λλ主: X.XX | λ客: X.XX\n"
+    "λ主: X.XX | λ客: X.XX\n"
     "</details>"
 )
 
@@ -898,9 +907,10 @@ def _search_with_tavily(system_prompt, user_query, search_mode="pre_match", mode
 
     if search_mode == "pre_match":
         search_rounds = [
-            f'"{search_target}" predicted lineup injuries 2026 World Cup',
-            f"{search_target} coach press conference referee appointment 2026",
+            f'"{search_target}" predicted lineup injuries team news 2026 World Cup',
+            f"{search_target} coach pre-match press conference tactical approach 2026",
             f'"{search_target}" odds betting preview head-to-head history',
+            f'{search_target} 预计首发 教练赛前发言 战术布置 伤病 2026世界杯',
         ]
     else:
         search_rounds = [
@@ -1397,6 +1407,10 @@ with col2:
                 analysis_query = (
                     f"赛前数据报告:\n{st.session_state.search_report[:8000]}\n\n"
                     f"数学模型计算结果 (Python 引擎):\n{math_json}\n\n"
+                    f"**【教练意图评级要求】**\n"
+                    f"从赛前数据报告中的「教练发言」和「首发阵容」揣摩双方教练的进攻意图，"
+                    f"按 L1-L5 评级（L1=极度保守, L2=谨慎, L3=均衡, L4=主动, L5=全力压上）。"
+                    f"必须写明评级依据。如果赛前数据中搜索不到教练发言，请标 L3 并注明「暂无赛前发言数据」。\n\n"
                     f"**【最高优先级】报告中必须使用以上「锁定比分」字段的值作为最终推演比分。"
                     f"你不得修改、重新计算、或给出任何其他比分预测。**\n"
                     f"请基于以上信息生成推演报告。"
