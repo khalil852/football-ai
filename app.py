@@ -1054,8 +1054,20 @@ def load_record_to_session(record):
 
 def calibrate_record(record, max_attempts=3):
     # ---- 第一步：获取赛后数据 ----
+    # 从搜索报告中提取对阵和比赛信息，作为赛后搜索的上下文
+    search_report = record.get("search_report", "")
+    match_name = record.get("match", "比赛")
+    # 从搜索报告中提取球队英文名（如果有），让搜索更精准
+    lines = search_report[:2000].strip().split("\n")
+    context_lines = [l.strip() for l in lines if l.strip() and len(l.strip()) > 10][:5]
+    match_context = f"对阵: {match_name}\n" + ("\n".join(context_lines) if context_lines else "")
+
     for attempt in range(max_attempts):
-        search_query = f"请联网搜索 {record['match']} 的赛后完整数据（比分、进球、技术统计、关键事件等）。"
+        search_query = (
+            f"【比赛信息】\n{match_context}\n\n"
+            f"请联网搜索 {match_name} 的赛后完整数据（最终比分、进球者、进球时间、"
+            f"射门统计、控球率、角球、红黄牌、换人、关键事件）。必须与以上比赛信息中的对阵一致。"
+        )
         post_match_data = call_deepseek(
             system_prompt_calibrate, search_query,
             enable_search=True, search_mode="post_match", model=MODEL_CALIBRATE
@@ -1067,7 +1079,8 @@ def calibrate_record(record, max_attempts=3):
         if attempt == max_attempts - 1:
             post_match_data = _deepseek_chat(
                 system_prompt_calibrate,
-                f"**【硬性规则】{record['match']} 是已结束的比赛。直接给出比分、进球者、关键事件。**",
+                f"**【硬性规则】{match_name} 是已结束的比赛。赛前数据：\n{match_context}\n"
+                f"直接给出最终比分、进球者、关键事件。**",
                 model=MODEL_CALIBRATE,
             )
             if "比赛尚未开始" in post_match_data:
