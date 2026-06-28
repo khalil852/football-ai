@@ -719,20 +719,17 @@ def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
         et_winner = "主" if et_home_bias > 0.5 else "客"
 
         # ---- 点球大战推演 ----
-        # 点球比分：永远有胜方（不存在"4-4点球平局"）
-        # 实力均衡时用 6-5（sudden death），偏差大时用 5-4 / 4-3
+        # 永远有胜方。根据 bias 连续映射到合理的点球比分
+        # bias 越偏离 0.5 → 比分差越大（常规轮次决胜）；越接近 0.5 → sudden death 险胜
         pen_home_bias = 0.5 + 0.08 * math.log(lam_ratio)
-        if pen_home_bias > 0.55:
-            pen_score_h, pen_score_a = 5, 4      # 主队常规轮次获胜
-        elif pen_home_bias > 0.53:
-            pen_score_h, pen_score_a = 6, 5      # 主队 sudden death 险胜
-        elif pen_home_bias < 0.45:
-            pen_score_h, pen_score_a = 4, 5      # 客队常规轮次获胜
-        elif pen_home_bias < 0.47:
-            pen_score_h, pen_score_a = 5, 6      # 客队 sudden death 险胜
+        raw_pen = round(abs(pen_home_bias - 0.5) * 20)  # 0~20 → 0~2 球差距
+        pen_gap = max(1, raw_pen)  # 至少 1 球差距（点球必有胜者）
+        if pen_home_bias > 0.50:
+            pen_score_h = 4 + pen_gap
+            pen_score_a = 4
         else:
-            # 极度均衡 → sudden death 任意一边
-            pen_score_h, pen_score_a = 6, 5 if pen_home_bias > 0.50 else (5, 6)
+            pen_score_h = 4
+            pen_score_a = 4 + pen_gap
 
         pen_away_bias = 1.0 - pen_home_bias
         home_adv = hw + extra_resolve * et_home_bias + penalties_pct * pen_home_bias
