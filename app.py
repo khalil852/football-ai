@@ -528,7 +528,7 @@ class LambdaModifiers:
         for k, v in merged_modifiers.items():
             try:
                 v = float(v)
-                v = max(0.5, min(2.0, v))  # 拒绝荒谬值
+                v = max(0.7, min(1.3, v))  # 拒绝荒谬值：修正因子合理范围 [0.7, 1.3]
             except (TypeError, ValueError):
                 continue
             if k in known:
@@ -1326,7 +1326,7 @@ with col2:
                     try: v = float(params.get(key, default))
                     except: v = default
                     # 拒绝荒谬值：修正因子应在 0.5-2.0 范围内
-                    return max(0.5, min(2.0, v)) if key not in ("lam_h_initial", "lam_a_initial", "odds_h", "odds_d", "odds_a") else v
+                    return max(0.7, min(1.3, v)) if key not in ("lam_h_initial", "lam_a_initial", "odds_h", "odds_d", "odds_a") else v
 
                 merged = params.get("merged_modifiers", {})
                 if merged:
@@ -1352,19 +1352,19 @@ with col2:
                         odds = (oh, od, oa)
                 except Exception:
                     pass
-                # λ 初始值：AI 提取 + clamp 检测
+                # λ 初始值：AI 提取，拒绝荒谬值（世界杯场均 0.5-3.5 球）
                 h_lam_ai = _f("lam_h_initial", 1.5)
                 a_lam_ai = _f("lam_a_initial", 1.2)
-                h_lam_ai = h_lam_ai if 0.3 <= h_lam_ai <= 4.0 else 1.5
-                a_lam_ai = a_lam_ai if 0.3 <= a_lam_ai <= 4.0 else 1.2
+                h_lam_ai = h_lam_ai if 0.8 <= h_lam_ai <= 4.0 else 1.5
+                a_lam_ai = a_lam_ai if 0.8 <= a_lam_ai <= 4.0 else 1.2
 
-                # 硬门槛：修正后的有效 λ 不得低于 0.3
+                # 硬门槛：修正后的有效 λ 不得低于 0.8（低于此值直接丢弃全部 AI 结果）
                 test_h = mod.apply(h_lam_ai, is_home=True)
                 test_a = mod.apply(a_lam_ai, is_home=False)
-                if test_h < 0.3 or test_a < 0.3:
+                if test_h < 0.8 or test_a < 0.8:
                     mod = LambdaModifiers(home_adv=1.08 if params.get("home_adv", False) else 1.0)
                     h_lam_ai, a_lam_ai = 1.5, 1.2
-                    st.warning("AI 修正因子异常，已恢复默认 λ 值。可通过校准反馈修正。")
+                    st.warning("AI 修正因子异常（λ < 0.8），已恢复默认值。可通过校准反馈修正。")
 
                 pred = predict_match(
                     home=params.get("home_team", ""), away=params.get("away_team", ""),
