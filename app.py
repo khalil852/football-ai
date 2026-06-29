@@ -530,7 +530,7 @@ def _deepseek_chat(system_prompt, user_content, model=None):
         url=URL,
         headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
         json=payload,
-        timeout=60
+        timeout=120 if payload.get("reasoning_effort") == "max" else 90
     )
     data = response.json()
     if 'error' in data:
@@ -1793,11 +1793,18 @@ with col2:
 
                 result = _deepseek_chat(_ANALYSIS_FROM_JSON_PROMPT, analysis_query,
                                         model=MODEL_ANALYSIS)
+                if not result:
+                    # v4-pro/max 超时 → 回退 chat 模型
+                    st.warning("推演模型超时，切换备用模型重试...")
+                    result = _deepseek_chat(_ANALYSIS_FROM_JSON_PROMPT, analysis_query,
+                                            model=MODEL_SEARCH)
                 if result:
                     st.session_state.analysis_report = result
                     st.session_state.math_json = math_json
                     save_record(match, st.session_state.search_report, st.session_state.analysis_report)
                     st.success("推演记录已保存至云端数据库。")
+                else:
+                    st.error("推演报告生成失败，请重试。")
         elif not match:
             st.warning("请先输入比赛名称")
         else:
