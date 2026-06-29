@@ -762,17 +762,32 @@ def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
 
 
 # ---- 赛后校准 ----
-def calibrate_math(pred: MatchPrediction, actual_h: int, actual_a: int) -> CalibrationResult:
+def calibrate_math(pred: MatchPrediction, actual_h: int, actual_a: int,
+                   is_knockout: bool = False, actual_home_adv: bool = None,
+                   is_et_or_pens: bool = False) -> CalibrationResult:
     pred_h = pred.locked_h
     pred_a = pred.locked_a
+
+    # 淘汰赛且推演平局：比分命中按 90 分钟判，额外算晋级命中
     score_match = (pred_h == actual_h and pred_a == actual_a)
     pred_r = "home" if pred.home_win > max(pred.draw, pred.away_win) else \
              "draw" if pred.draw > max(pred.home_win, pred.away_win) else "away"
     actual_r = "home" if actual_h > actual_a else "draw" if actual_h == actual_a else "away"
     result_match = (pred_r == actual_r)
+
+    # 淘汰赛特殊计分：如果推演平局且 90 分钟确实平局，即使 actual 比分不同（ET 进球），
+    # 只扣偏差分，不扣"胜负预测错误"的 25 分
+    knockout_adv_bonus = 0
+    if is_knockout and pred.is_knockout and pred.locked_h == pred.locked_a:
+        if actual_h == actual_a and actual_home_adv is not None:
+            # 90 分钟确实平局 → 晋级预测准确度加分
+            pred_home_adv = pred.home_advance > 0.5
+            if pred_home_adv == actual_home_adv:
+                knockout_adv_bonus = 15  # 晋级预测命中，+15 分
+
     deviation = abs(pred_h - actual_h) + abs(pred_a - actual_a)
-    score = max(0, min(100, 100 - deviation * 15 - (0 if result_match else 25) -
-                       (0 if pred.confidence >= 0.5 else 10)))
+    score = max(0, min(100, 100 - deviation * 15 - (0 if result_match else 25) +
+                   knockout_adv_bonus - (0 if pred.confidence >= 0.5 else 10)))
     return CalibrationResult(accuracy_score=round(score, 1),
                              score_match=score_match, result_match=result_match,
                              goal_deviation=round(deviation, 2))
@@ -1237,6 +1252,25 @@ def calibrate_record(record, max_attempts=3):
     post_params = _extract_params(post_match_data)
     actual_h = post_params.get("actual_h") or post_params.get("predicted_h")
     actual_a = post_params.get("actual_a") or post_params.get("predicted_a")
+
+    # 检测加时赛/点球大战
+    is_extra_time = bool(re.search(r'extra.time|aet|加时|after.extra|ET\b', post_match_data, re.IGNORECASE))
+    is_penalty_match = bool(re.search(r'penal|pen\b|shootout|点球', post_match_data.lower()))
+
+    # 淘汰赛：尝试分离 90 分钟比分和加时赛后比分
+    actual_90_h = actual_90_a = None
+    if is_extra_time or is_penalty_match:
+        # 常见格式: "1-1 after 90 minutes" / "90分钟 1-1" / "FT: 1-1" / "(1-1) aet 2-1"
+        et_patterns = [
+            r'(?:90.分钟|常规时间|FT|full.time|after.90).*?(\d+)\s*[-:]\s*(\d+)',
+            r'\((\d+)\s*[-:]\s*(\d+)\)\s*(?:aet|a\.e\.t|加时|extra.time)',
+        ]
+        for pat in et_patterns:
+            m90 = re.search(pat, post_match_data, re.IGNORECASE)
+            if m90:
+                actual_90_h, actual_90_a = int(m90.group(1)), int(m90.group(2))
+                break
+
     if actual_h is None or actual_a is None:
         # 去括号，防止点球比分 ("1-1 (4-2 pens)") 干扰90分钟比分提取
         clean = re.sub(r'\([^)]*\d+[^)]*\)', '', post_match_data)
@@ -1244,17 +1278,37 @@ def calibrate_record(record, max_attempts=3):
         if scores:
             actual_h, actual_a = int(scores[0][0]), int(scores[0][1])
         else:
-            # 回退：允许带括号匹配
             scores = re.findall(r'(\d+)\s*[-:]\s*(\d+)', post_match_data)
             actual_h, actual_a = (int(scores[0][0]), int(scores[0][1])) if scores else (0, 0)
+
+    # 校准用实际比分：优先 90 分钟比分（淘汰赛），否则用提取到的比分
+    cal_h = actual_90_h if actual_90_h is not None else actual_h
+    cal_a = actual_90_a if actual_90_a is not None else actual_a
+    if cal_h is None or cal_a is None:
+        cal_h, cal_a = 0, 0
 
     # ---- 第三步：Python 数学引擎校准 ----
     math_cal = None
     pred = st.session_state.get("math_prediction")
-    # 检测点球大战（post_match_data 中可能有 "pens" 或 "penalty" 字样）
-    is_penalty_match = bool(re.search(r'penal|pen\b|shootout|点球', post_match_data.lower()))
-    if pred and actual_h is not None and actual_a is not None:
-        math_cal = calibrate_math(pred, int(actual_h), int(actual_a))
+    if pred and cal_h is not None and cal_a is not None:
+        # 淘汰赛：判断实际晋级方
+        detected_adv = None
+        if pred.is_knockout:
+            if is_extra_time or is_penalty_match:
+                # 有加时/点球 → 90 分钟平局，从文本判断谁晋级
+                detected_adv = bool(re.search(
+                    rf'{re.escape(pred.home_team)}.{{0,20}}(?:win|advance|晋级|through|qualif)',
+                    post_match_data, re.IGNORECASE))
+                if not detected_adv and not re.search(
+                    rf'{re.escape(pred.away_team)}.{{0,20}}(?:win|advance|晋级|through|qualif)',
+                    post_match_data, re.IGNORECASE):
+                    detected_adv = None  # 无法判断
+            else:
+                detected_adv = cal_h > cal_a
+        math_cal = calibrate_math(pred, int(cal_h), int(cal_a),
+                                  is_knockout=pred.is_knockout,
+                                  actual_home_adv=detected_adv,
+                                  is_et_or_pens=(is_extra_time or is_penalty_match))
 
     # ---- 第四步：LLM 生成校准报告 + 定律提炼 ----
     all_laws = laws_data["laws"]
@@ -1265,15 +1319,16 @@ def calibrate_record(record, max_attempts=3):
         math_block = (
             f"\n\n【Python 数学引擎校准结果】\n"
             f"准确率评分: {math_cal.accuracy_score}/100\n"
-            f"推演比分: {pred.locked_h} - {pred.locked_a} → 实际比分: {actual_h} - {actual_a}\n"
-            f"进球偏差: {math_cal.goal_deviation}球 (推演{abs(pred.locked_h - actual_h)} + {abs(pred.locked_a - actual_a)})\n"
+            f"推演比分(90分钟): {pred.locked_h} - {pred.locked_a} → 实际90分钟: {cal_h} - {cal_a}\n"
+            f"进球偏差: {math_cal.goal_deviation}球\n"
             f"比分命中: {'是' if math_cal.score_match else '否'} | "
             f"胜负命中: {'是' if math_cal.result_match else '否'}\n"
         )
         if pred.is_knockout:
             # 淘汰赛额外校验：晋级预测是否准确
-            actual_home_adv = actual_h > actual_a or (actual_h == actual_a and is_penalty_match)
             pen_msg = " (含点球)" if is_penalty_match else ""
+            # 实际晋级方：优先用文本检测（step 3），回退到比分判断
+            actual_home_adv = detected_adv if detected_adv is not None else (cal_h > cal_a)
             if pred.locked_h == pred.locked_a:
                 # 推演为平局 → 走过加时/点球推演
                 pred_home_adv = pred.home_advance > 0.5
