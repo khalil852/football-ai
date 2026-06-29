@@ -453,13 +453,18 @@ def parse_match_time(match_time_str):
     return None
 
 
+def _now_beijing():
+    """返回北京时间（UTC+8）的 datetime。Streamlit Cloud 服务器在 UTC，需要显式 +8"""
+    return datetime.utcnow() + timedelta(hours=8)
+
+
 def get_match_status(match_time_str):
     if not match_time_str:
         return "未知", "⚪"
     match_time = parse_match_time(match_time_str)
     if not match_time:
         return "未知", "⚪"
-    now = datetime.now()
+    now = _now_beijing()
     if now < match_time:
         return "未开赛", "🔵"
     # 比赛时间 + 150 分钟（含加时+点球+赛后 delay）
@@ -471,7 +476,7 @@ def get_match_status(match_time_str):
 
 def can_calibrate(match_time_str):
     """判断是否可以校准。返回 (bool, str)"""
-    now = datetime.now()
+    now = _now_beijing()
 
     if not match_time_str:
         return False, "⚠️ 未找到开赛时间，无法自动判断。请确认比赛已结束后再手动校准。"
@@ -1517,7 +1522,7 @@ if training_mode:
         "比赛日期（必填）",
         value=None,
         help="请确认比赛日期在过去。",
-        max_value=datetime.now().date()
+        max_value=_now_beijing().date()
     )
     if training_match_date is None:
         st.warning("请选择比赛日期后再继续。")
