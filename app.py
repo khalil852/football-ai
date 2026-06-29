@@ -1317,7 +1317,7 @@ def calibrate_record(record, max_attempts=3):
 ## 输出
 报告结构:
 ### 准确率: {math_cal.accuracy_score if math_cal else '?'}/100
-<small>推演 {pred.locked_h}-{pred.locked_a} | 实际 {actual_h}-{actual_a} | 偏差 {math_cal.goal_deviation if math_cal else '?'}球</small>
+<small>推演 {f'{pred.locked_h}-{pred.locked_a}' if pred else '暂无'} | 实际 {actual_h}-{actual_a} | 偏差 {math_cal.goal_deviation if math_cal else '?'}球</small>
 
 ### 差异
 ✅ [被验证的逻辑, 每条≤1句]
