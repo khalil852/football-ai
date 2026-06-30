@@ -724,17 +724,15 @@ def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
         et_winner = "主" if et_home_bias > 0.5 else "客"
 
         # ---- 点球大战推演 ----
-        # 永远有胜方。根据 bias 连续映射到合理的点球比分
-        # bias 越偏离 0.5 → 比分差越大（常规轮次决胜）；越接近 0.5 → sudden death 险胜
+        # 永远有胜方。bias 范围 ~0.44-0.56 → 分差 1-3 球
         pen_home_bias = 0.5 + 0.08 * math.log(lam_ratio)
-        raw_pen = round(abs(pen_home_bias - 0.5) * 20)  # 0~20 → 0~2 球差距
-        pen_gap = max(1, raw_pen)  # 至少 1 球差距（点球必有胜者）
+        pen_gap = max(1, round(abs(pen_home_bias - 0.5) * 50))  # 0.02→1, 0.04→2, 0.06→3
         if pen_home_bias > 0.50:
-            pen_score_h = 4 + pen_gap
-            pen_score_a = 4
+            pen_score_h = 3 + pen_gap
+            pen_score_a = 3
         else:
-            pen_score_h = 4
-            pen_score_a = 4 + pen_gap
+            pen_score_h = 3
+            pen_score_a = 3 + pen_gap
 
         pen_away_bias = 1.0 - pen_home_bias
         home_adv = hw + extra_resolve * et_home_bias + penalties_pct * pen_home_bias
@@ -1667,8 +1665,13 @@ with col2:
                 a_lam_ai = _f("lam_a_initial", 1.2)
                 h_lam_ai = h_lam_ai if 0.8 <= h_lam_ai <= 4.0 else 1.5
                 a_lam_ai = a_lam_ai if 0.8 <= a_lam_ai <= 4.0 else 1.2
+                # 防平局偏向：如果 AI 给出的两队 λ 太接近（ratio < 1.2），
+                # 轻微拉开差距（强队+0.1，弱队-0.05）
+                if 0.85 < h_lam_ai / (a_lam_ai + 0.01) < 1.20:
+                    h_lam_ai += 0.1
+                    a_lam_ai = max(0.8, a_lam_ai - 0.05)
 
-                # 硬门槛：修正后的有效 λ 不得低于 0.8（低于此值直接丢弃全部 AI 结果）
+                # 硬门槛：修正后的有效 λ 不得低于 0.8
                 test_h = mod.apply(h_lam_ai, is_home=True)
                 test_a = mod.apply(a_lam_ai, is_home=False)
                 if test_h < 0.8 or test_a < 0.8:
