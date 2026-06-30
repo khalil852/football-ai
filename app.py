@@ -693,16 +693,6 @@ def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
         total = sum(probs.values())
         if total > 0:
             probs = {k: v / total for k, v in probs.items()}
-        total = 0.0
-        for (h, a), p in probs.items():
-            nb_h = max(1e-10, _neg_binom_p(lh, h, phi))
-            nb_a = max(1e-10, _neg_binom_p(la, a, phi))
-            po_h = max(1e-10, math.exp(-lh) * lh**h / math.factorial(h))
-            po_a = max(1e-10, math.exp(-la) * la**a / math.factorial(a))
-            adj[(h, a)] = p * (nb_h / po_h) ** 0.5 * (nb_a / po_a) ** 0.5
-            total += adj[(h, a)]
-        if total > 0:
-            probs = {k: v / total for k, v in adj.items()}
 
     hw = dw = aw = eh = ea = 0.0
     for (h, a), p in probs.items():
