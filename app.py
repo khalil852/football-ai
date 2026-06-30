@@ -1960,7 +1960,12 @@ if st.session_state.get("math_json"):
     </div>
     """, unsafe_allow_html=True)
     if mj.get("主队晋级概率"):
-        st.markdown(f"🏆 晋级概率: 主队 {mj['主队晋级概率']} / 客队 {mj['客队晋级概率']}", help=f"加时 {mj.get('加时赛比分','?')} 点球 {mj.get('点球比分','未触发')}")
+        extra_line = ""
+        if mj.get("加时赛比分"):
+            extra_line += f" 加时 {mj['加时赛比分']}"
+        if mj.get("点球比分"):
+            extra_line += f" 点球 {mj['点球比分']}"
+        st.markdown(f"🏆 主队 {mj.get('主队晋级概率','')} / 客队 {mj.get('客队晋级概率','')}{extra_line}")
 
 if st.session_state.search_report:
     with st.expander("📡 信息雷达：赛前数据报告", expanded=True):
