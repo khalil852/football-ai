@@ -4,6 +4,7 @@ import json
 import os
 import re
 import math
+import time
 import hashlib
 import random
 import string
@@ -1634,23 +1635,22 @@ st.session_state.training_mode = training_mode
 if st.button("⚡ 一键推演", use_container_width=True, type="primary",
               help="自动完成搜索+推演，适合快速查看预测", key="one_click_predict"):
     if match:
-        pbar = st.empty()
-        pbar.info("🔍 正在搜索并汇总数据...")
+        prog = st.progress(0, text="🔍 正在搜索并汇总数据...")
         try:
             sq = f"请为 {match} 搜集赛前关键信息，并严格按照模板格式输出。" if not training_mode else \
                  f"请为 {match} 搜集比赛的赛前关键信息（首发阵容、伤病、赔率、历史交锋、教练发言、出线形势），并严格按照模板格式输出。请注意：这是一场已经结束的比赛，但请只搜集「赛前」信息，不要包含最终比分或赛后数据。"
             search_result = call_deepseek(system_prompt_search, sq, enable_search=True, search_mode="pre_match", model=MODEL_SEARCH)
             if not search_result:
-                pbar.empty(); st.warning("搜索未返回结果，请检查比赛名称或重试。"); st.stop()
+                prog.empty(); st.warning("搜索未返回结果，请检查比赛名称或重试。"); st.stop()
             st.session_state.search_report = search_result
             st.session_state.current_match = match
             et = extract_match_time(search_result)
             if et: st.session_state.current_match_time = et
             elif training_mode: st.session_state.current_match_time = "2000-01-01 00:00"
         except Exception as e:
-            pbar.empty(); st.error(f"搜索出错: {str(e)[:80]}"); st.stop()
+            prog.empty(); st.error(f"搜索出错: {str(e)[:80]}"); st.stop()
 
-        pbar.info("🧮 正在提取参数并运行数学引擎...（预计 20-40 秒）")
+        prog.progress(0.4, text="🧮 正在提取参数并运行数学引擎...（预计 20-40 秒）")
         try:
             params = _extract_params(search_result, laws_data.get("laws",[]))
             def ok(key, d=1.0):
@@ -1671,7 +1671,7 @@ if st.button("⚡ 一键推演", use_container_width=True, type="primary",
                 d = 0.15 if r<1.30 else 0.08; h0+=d; a0=max(0.8,a0-d*0.5)
             pred = predict_match(home=params.get("home_team",""),away=params.get("away_team",""),lam_h0=h0,lam_a0=a0,mod=mod,odds=odds,lam_c=ok("lam_c",0.01),phi=ok("phi",0.20),is_knockout=is_knockout)
             st.session_state.math_prediction=pred; pred.confidence*=mod.confidence
-            pbar.info("📝 正在生成推演报告...")
+            prog.progress(0.7, text="📝 正在生成推演报告...")
             mi = {k:getattr(mod,k) for k in ("attack","defense","tactical","coach_intent","scenario","home_adv","confidence")}; mi.update(mod._extra)
             ef = {}
             if is_knockout and pred.locked_h==pred.locked_a:
@@ -1682,15 +1682,17 @@ if st.button("⚡ 一键推演", use_container_width=True, type="primary",
             aq = f"赛前数据报告:\n{search_result[:8000]}\n\n数学模型计算结果:\n{mj}\n\n**【教练意图评级要求】**\n从赛前数据报告中的「教练发言」和「首发阵容」揣摩双方教练的进攻意图，按 L1-L5 评级。必须写明评级依据。\n\n**【最高优先级】报告中必须使用以上「锁定比分」字段的值作为最终推演比分。**\n"
             result = _deepseek_chat(_ANALYSIS_FROM_JSON_PROMPT, aq, model=MODEL_ANALYSIS)
             if not result:
-                pbar.info("🔄 备用模型重试..."); result = _deepseek_chat(_ANALYSIS_FROM_JSON_PROMPT, aq, model=MODEL_SEARCH)
+                prog.progress(0.85, text="🔄 备用模型重试..."); result = _deepseek_chat(_ANALYSIS_FROM_JSON_PROMPT, aq, model=MODEL_SEARCH)
             if result:
                 st.session_state.analysis_report = result; st.session_state.math_json = mj
                 save_record(match, search_result, result)
-                pbar.empty(); st.success("✅ 推演完成！"); st.rerun()
+                prog.progress(1.0, text="✅ 推演完成！")
+                time.sleep(0.5)
+                prog.empty(); st.rerun()
             else:
-                pbar.empty(); st.error("推演报告生成失败，请重试。")
+                prog.empty(); st.error("推演报告生成失败，请重试。")
         except Exception as e:
-            pbar.empty(); st.error(f"推演出错: {str(e)[:80]}")
+            prog.empty(); st.error(f"推演出错: {str(e)[:80]}")
     else:
         st.warning("请先输入比赛名称")
 
@@ -1926,11 +1928,7 @@ with col2:
         st.warning("请先搜集赛前数据")
 
 # ============ 实时结果显示区域 ============
-if st.session_state.search_report:
-    with st.expander("📡 信息雷达：赛前数据报告", expanded=True):
-        st.markdown(st.session_state.search_report)
-
-# 核心信息突出展示
+# 比分卡片优先展示（放在最上面）
 if st.session_state.get("math_json"):
     mj_raw = st.session_state.math_json
     if isinstance(mj_raw, str):
@@ -1952,9 +1950,12 @@ if st.session_state.get("math_json"):
         <div style="font-size:0.9em; margin-top:8px; color:gray;">{hw} | {dr} | {aw} &nbsp; 置信度 {conf}</div>
     </div>
     """, unsafe_allow_html=True)
-    # 加时/点球详情
     if mj.get("主队晋级概率"):
         st.markdown(f"🏆 晋级概率: 主队 {mj['主队晋级概率']} / 客队 {mj['客队晋级概率']}", help=f"加时 {mj.get('加时赛比分','?')} 点球 {mj.get('点球比分','未触发')}")
+
+if st.session_state.search_report:
+    with st.expander("📡 信息雷达：赛前数据报告", expanded=True):
+        st.markdown(st.session_state.search_report)
 
 if st.session_state.analysis_report:
     with st.expander("🧠 推演引擎：全维推演报告", expanded=False):
