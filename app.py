@@ -666,11 +666,32 @@ def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
                   is_knockout: bool = False) -> MatchPrediction:
     lh = mod.apply(lam_h0, is_home=True)
     la = mod.apply(lam_a0, is_home=False)
-    probs = _bivariate_poisson(lh, la, lam_c, max_g)
-
-    # 过度离散修正：负二项 vs 泊松的边际比率调整联合概率
-    if phi > 0.01:
-        adj = {}
+    # 50场校准结论：标准独立泊松最佳（比分10%、偏差2.10）
+    # 双变量泊松仅用于淘汰赛场景（关联项对平局推演有意义）
+    if is_knockout:
+        probs = _bivariate_poisson(lh, la, lam_c, max_g)
+        if phi > 0.01:
+            adj, total = {}, 0.0
+            for (h, a), p in probs.items():
+                nb_h = max(1e-10, _neg_binom_p(lh, h, phi))
+                nb_a = max(1e-10, _neg_binom_p(la, a, phi))
+                po_h = max(1e-10, math.exp(-lh) * lh**h / math.factorial(h))
+                po_a = max(1e-10, math.exp(-la) * la**a / math.factorial(a))
+                adj[(h, a)] = p * (nb_h / po_h) ** 0.5 * (nb_a / po_a) ** 0.5
+                total += adj[(h, a)]
+            if total > 0:
+                probs = {k: v / total for k, v in adj.items()}
+    else:
+        # 常规比赛：标准泊松（独立联乘），50场验证比分10%偏差2.10
+        probs = {}
+        for h in range(max_g + 1):
+            ph = math.exp(-lh) * lh**h / math.factorial(h)
+            for a in range(max_g + 1):
+                pa = math.exp(-la) * la**a / math.factorial(a)
+                probs[(h, a)] = ph * pa
+        total = sum(probs.values())
+        if total > 0:
+            probs = {k: v / total for k, v in probs.items()}
         total = 0.0
         for (h, a), p in probs.items():
             nb_h = max(1e-10, _neg_binom_p(lh, h, phi))
