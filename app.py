@@ -8,6 +8,7 @@ import hashlib
 import random
 import string
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Dict, Tuple
 from supabase import create_client, Client
@@ -1051,6 +1052,12 @@ def _parse_teams(query):
 
 
 # ============ Tavily 搜索（所有数据来源）============
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_tavily(query):
+    """缓存 Tavily 结果，相同 query 1 小时内不重复搜索"""
+    return _tavily_search(query)
+
+
 def _tavily_search(query):
     """Tavily 搜索，返回格式化结果"""
     try:
@@ -1107,10 +1114,12 @@ def _search_with_tavily(system_prompt, user_query, search_mode="pre_match", mode
         ]
 
     all_results = ""
-    for q in search_rounds:
-        r = _tavily_search(q)
-        if r and "搜索失败" not in r:
-            all_results += r + "\n"
+    with ThreadPoolExecutor(max_workers=len(search_rounds)) as ex:
+        futures = [ex.submit(_cached_tavily, q) for q in search_rounds]
+        for f in as_completed(futures):
+            r = f.result()
+            if r and "搜索失败" not in r:
+                all_results += r + "\n"
 
     if not all_results:
         return ""
@@ -1231,7 +1240,7 @@ def calibrate_record(record, max_attempts=3):
         ]
         raw_search = ""
         for q in search_rounds:
-            r = _tavily_search(q)
+            r = _cached_tavily(q)
             if r and "搜索未返回有效结果" not in r and "搜索失败" not in r:
                 raw_search += r + "\n"
 
