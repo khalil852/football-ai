@@ -661,14 +661,9 @@ def _implied_probs(odds_h: float, odds_d: float, odds_a: float) -> Tuple[float, 
     return raw[0] / overround, raw[1] / overround, raw[2] / overround, overround
 
 
-# ---- 核心推演 ----
-def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
-                  mod: LambdaModifiers, odds: Tuple[float, float, float] = None,
-                  lam_c: float = 0.01, phi: float = 0.20, max_g: int = 8,
-                  is_knockout: bool = False) -> MatchPrediction:
-    lh = mod.apply(lam_h0, is_home=True)
-    la = mod.apply(lam_a0, is_home=False)
-    # 防平局：确保强弱队 λ 有足够差距
+# ---- 调参层（含所有启发式补丁）----
+def _adjust_lambda(lh: float, la: float, is_knockout: bool = False) -> Tuple[float, float]:
+    """调整 λ 值。所有防平局/阈值修正集中在此层，不污染底层数学。"""
     if not is_knockout:
         diff = lh - la
         if diff < 0.08:
@@ -677,32 +672,51 @@ def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
             else: la += add; lh = max(0.7, lh - add * 0.3)
         elif diff < 0.45:
             add = 0.18
-            lh += add
-            la = max(0.7, la - add * 0.6)
-    if is_knockout:
-        probs = _bivariate_poisson(lh, la, lam_c, max_g)
-        if phi > 0.01:
-            adj, total = {}, 0.0
-            for (h, a), p in probs.items():
-                nb_h = max(1e-10, _neg_binom_p(lh, h, phi))
-                nb_a = max(1e-10, _neg_binom_p(la, a, phi))
-                po_h = max(1e-10, math.exp(-lh) * lh**h / math.factorial(h))
-                po_a = max(1e-10, math.exp(-la) * la**a / math.factorial(a))
-                adj[(h, a)] = p * (nb_h / po_h) ** 0.5 * (nb_a / po_a) ** 0.5
-                total += adj[(h, a)]
-            if total > 0:
-                probs = {k: v / total for k, v in adj.items()}
-    else:
-        # 常规比赛：标准泊松（独立联乘），50场验证比分10%偏差2.10
-        probs = {}
-        for h in range(max_g + 1):
-            ph = math.exp(-lh) * lh**h / math.factorial(h)
-            for a in range(max_g + 1):
-                pa = math.exp(-la) * la**a / math.factorial(a)
-                probs[(h, a)] = ph * pa
-        total = sum(probs.values())
+            lh += add; la = max(0.7, la - add * 0.6)
+    return lh, la
+
+
+# ---- 底层：标准泊松（不可变，零补丁）----
+def _std_poisson(lam_h: float, lam_a: float, max_g: int = 8) -> dict:
+    """纯数学泊松联乘。输出 { (h,a): prob }，不入任何启发式。"""
+    probs = {}
+    for h in range(max_g + 1):
+        ph = math.exp(-lam_h) * lam_h**h / math.factorial(h)
+        for a in range(max_g + 1):
+            pa = math.exp(-lam_a) * lam_a**a / math.factorial(a)
+            probs[(h, a)] = ph * pa
+    total = sum(probs.values())
+    return {k: v / total for k, v in probs.items()} if total > 0 else probs
+
+
+# ---- 底层：双变量泊松 + 过度离散（淘汰赛专用）----
+def _full_model(lh: float, la: float, lam_c: float = 0.01, phi: float = 0.20, max_g: int = 8) -> dict:
+    probs = _bivariate_poisson(lh, la, lam_c, max_g)
+    if phi > 0.01:
+        adj, total = {}, 0.0
+        for (h, a), p in probs.items():
+            nb_h = max(1e-10, _neg_binom_p(lh, h, phi))
+            nb_a = max(1e-10, _neg_binom_p(la, a, phi))
+            po_h = max(1e-10, math.exp(-lh) * lh**h / math.factorial(h))
+            po_a = max(1e-10, math.exp(-la) * la**a / math.factorial(a))
+            adj[(h, a)] = p * (nb_h / po_h) ** 0.5 * (nb_a / po_a) ** 0.5
+            total += adj[(h, a)]
         if total > 0:
-            probs = {k: v / total for k, v in probs.items()}
+            return {k: v / total for k, v in adj.items()}
+    return probs
+
+
+# ---- 核心推演（上层调参 + 底层数学，分层清晰）----
+def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
+                  mod: LambdaModifiers, odds: Tuple[float, float, float] = None,
+                  lam_c: float = 0.01, phi: float = 0.20, max_g: int = 8,
+                  is_knockout: bool = False) -> MatchPrediction:
+    lh = mod.apply(lam_h0, is_home=True)
+    la = mod.apply(lam_a0, is_home=False)
+    # 调参层（所有启发式补丁）
+    lh, la = _adjust_lambda(lh, la, is_knockout)
+    # 数学层（零补丁）
+    probs = _full_model(lh, la, lam_c, phi, max_g) if is_knockout else _std_poisson(lh, la, max_g)
 
     hw = dw = aw = eh = ea = 0.0
     for (h, a), p in probs.items():
@@ -717,20 +731,19 @@ def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
     # ---- 淘汰赛加时+点球推演 ----
     home_adv = hw; away_adv = aw
     extra_time_pct = 0.0; penalties_pct = 0.0
-    et_score_h, et_score_a = 0, 0       # 加时赛比分
-    pen_score_h, pen_score_a = 0, 0       # 点球比分
-    et_winner = ""                         # 加时赛胜方
-    pen_winner = ""                        # 点球胜方
+    et_score_h, et_score_a = 0, 0
+    pen_score_h, pen_score_a = 0, 0
+    et_winner = ""
+    pen_winner = ""
     draw_at_90 = (locked_h == locked_a)
 
     if is_knockout and draw_at_90:
         lam_ratio = min(max(lh / (la + 0.01), 0.6), 1.6)
-        extra_time_pct = dw  # 100% 进入加时
-        extra_resolve = dw * 0.65  # 65% 加时分胜负
-        penalties_pct = dw * 0.35  # 35% 点球
+        extra_time_pct = dw
+        extra_resolve = dw * 0.65
+        penalties_pct = dw * 0.35
 
-        # ---- 加时赛推演 ----
-        et_lam_h = lh * 0.33   # 30 分钟 ≈ 90 分钟的 1/3
+        et_lam_h = lh * 0.33
         et_lam_a = la * 0.33
         et_probs = _bivariate_poisson(et_lam_h, et_lam_a, lam_c, max_g=4)
         et_hw = et_dw = et_aw = 0.0
