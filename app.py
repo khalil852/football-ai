@@ -1640,6 +1640,74 @@ if "training_mode" not in st.session_state:
     st.session_state.training_mode = False
 st.session_state.training_mode = training_mode
 
+# 一键推演（两步连跑）
+one_click = st.button("⚡ 一键推演", use_container_width=True, type="primary",
+                      help="自动完成搜索+推演，适合快速查看预测")
+
+# 一键推演（搜索 + 推演连跑）
+if st.button("⚡ 一键推演", use_container_width=True, type="primary",
+              help="自动完成搜索+推演，适合快速查看预测"):
+    if match:
+        pbar = st.empty()
+        pbar.info("🔍 正在搜索并汇总数据...")
+        try:
+            sq = f"请为 {match} 搜集赛前关键信息，并严格按照模板格式输出。" if not training_mode else \
+                 f"请为 {match} 搜集比赛的赛前关键信息（首发阵容、伤病、赔率、历史交锋、教练发言、出线形势），并严格按照模板格式输出。请注意：这是一场已经结束的比赛，但请只搜集「赛前」信息，不要包含最终比分或赛后数据。"
+            search_result = call_deepseek(system_prompt_search, sq, enable_search=True, search_mode="pre_match", model=MODEL_SEARCH)
+            if not search_result:
+                pbar.empty(); st.warning("搜索未返回结果，请检查比赛名称或重试。"); st.stop()
+            st.session_state.search_report = search_result
+            st.session_state.current_match = match
+            et = extract_match_time(search_result)
+            if et: st.session_state.current_match_time = et
+            elif training_mode: st.session_state.current_match_time = "2000-01-01 00:00"
+        except Exception as e:
+            pbar.empty(); st.error(f"搜索出错: {str(e)[:80]}"); st.stop()
+
+        pbar.info("🧮 正在提取参数并运行数学引擎...（预计 20-40 秒）")
+        try:
+            params = _extract_params(search_result, laws_data.get("laws",[]))
+            def ok(key, d=1.0):
+                try: v = float(params.get(key,d))
+                except: v = d
+                return max(0.7,min(1.3,v)) if key not in ("lam_h_initial","lam_a_initial","odds_h","odds_d","odds_a") else v
+            merged = params.get("merged_modifiers",{})
+            mod = LambdaModifiers.from_merged(merged, home_adv=params.get("home_adv",False)) if merged else LambdaModifiers(attack=ok("attack"),defense=ok("defense"),tactical=ok("tactical"),coach_intent=ok("coach_intent"),scenario=ok("scenario"),home_adv=1.08 if params.get("home_adv",False) else 1.0)
+            odds = None
+            try:
+                oh,od,oa = float(params.get("odds_h",0)),float(params.get("odds_d",0)),float(params.get("odds_a",0))
+                if oh and od and oa: odds=(oh,od,oa)
+            except: pass
+            h0 = max(0.8,min(4.0,ok("lam_h_initial",1.5)))
+            a0 = max(0.8,min(4.0,ok("lam_a_initial",1.2)))
+            r = h0/(a0+0.01)
+            if 0.7<r<1.50:
+                d = 0.15 if r<1.30 else 0.08; h0+=d; a0=max(0.8,a0-d*0.5)
+            pred = predict_match(home=params.get("home_team",""),away=params.get("away_team",""),lam_h0=h0,lam_a0=a0,mod=mod,odds=odds,lam_c=ok("lam_c",0.01),phi=ok("phi",0.20),is_knockout=is_knockout)
+            st.session_state.math_prediction=pred; pred.confidence*=mod.confidence
+            pbar.info("📝 正在生成推演报告...")
+            mi = {k:getattr(mod,k) for k in ("attack","defense","tactical","coach_intent","scenario","home_adv","confidence")}; mi.update(mod._extra)
+            ef = {}
+            if is_knockout and pred.locked_h==pred.locked_a:
+                ef["比赛类型"]="淘汰赛"; ef["90分钟"]=f"{pred.locked_h}-{pred.locked_a}"; ef["加时赛比分"]=f"{pred.et_score_h}-{pred.et_score_a}"
+                if pred.et_score_h==pred.et_score_a: ef["点球比分"]=f"{pred.pen_score_h}-{pred.pen_score_a}"
+                ef["主队晋级概率"]=f"{pred.home_advance*100:.1f}%"; ef["客队晋级概率"]=f"{pred.away_advance*100:.1f}%"
+            mj=json.dumps({"锁定比分":f"{pred.locked_h}-{pred.locked_a}","主队":pred.home_team,"客队":pred.away_team,"主队λ":round(pred.lam_h,2),"客队λ":round(pred.lam_a,2),"期望进球":f"{pred.exp_h:.2f}-{pred.exp_a:.2f}","主胜":f"{pred.home_win*100:.1f}%","平局":f"{pred.draw*100:.1f}%","客胜":f"{pred.away_win*100:.1f}%","比分概率":[f"{h}-{a}({p*100:.1f}%)" for (h,a),p in pred.top_scores[:5]],"模型置信度":f"{pred.confidence*100:.0f}%","定律修正因子":mi,**ef},ensure_ascii=False)
+            aq = f"赛前数据报告:\n{search_result[:8000]}\n\n数学模型计算结果:\n{mj}\n\n**【教练意图评级要求】**\n从赛前数据报告中的「教练发言」和「首发阵容」揣摩双方教练的进攻意图，按 L1-L5 评级。必须写明评级依据。\n\n**【最高优先级】报告中必须使用以上「锁定比分」字段的值作为最终推演比分。**\n"
+            result = _deepseek_chat(_ANALYSIS_FROM_JSON_PROMPT, aq, model=MODEL_ANALYSIS)
+            if not result:
+                pbar.info("🔄 备用模型重试..."); result = _deepseek_chat(_ANALYSIS_FROM_JSON_PROMPT, aq, model=MODEL_SEARCH)
+            if result:
+                st.session_state.analysis_report = result; st.session_state.math_json = mj
+                save_record(match, search_result, result)
+                pbar.empty(); st.success("✅ 推演完成！"); st.rerun()
+            else:
+                pbar.empty(); st.error("推演报告生成失败，请重试。")
+        except Exception as e:
+            pbar.empty(); st.error(f"推演出错: {str(e)[:80]}")
+    else:
+        st.warning("请先输入比赛名称")
+
 col1, col2 = st.columns(2)
 
 with col1:
@@ -1680,203 +1748,225 @@ with col2:
     btn_label2 = "🧠 开始全维推演" if not training_mode else "🧠 训练推演"
     if st.button(btn_label2, use_container_width=True):
         if match and st.session_state.search_report:
-            with st.spinner("正在提取参数并运行数学引擎..."):
-                # 1. 从搜索结果提取结构化参数
-                params = _extract_params(st.session_state.search_report,
-                                         laws_data.get("laws", []))
-                # 2. 从定律分析结果构建修正因子（兼容任意用户定律）
-                def _f(key, default=1.0):
-                    try: v = float(params.get(key, default))
-                    except: v = default
-                    # 拒绝荒谬值：修正因子应在 0.5-2.0 范围内
-                    return max(0.7, min(1.3, v)) if key not in ("lam_h_initial", "lam_a_initial", "odds_h", "odds_d", "odds_a") else v
+            pbar = st.empty()
+            pbar.info("⏳ 正在提取参数并运行数学引擎...（预计 20-40 秒）")
+            # 1. 从搜索结果提取结构化参数
+            params = _extract_params(st.session_state.search_report,
+                                     laws_data.get("laws", []))
+            # 2. 从定律分析结果构建修正因子（兼容任意用户定律）
+            def _f(key, default=1.0):
+                try: v = float(params.get(key, default))
+                except: v = default
+                # 拒绝荒谬值：修正因子应在 0.5-2.0 范围内
+                return max(0.7, min(1.3, v)) if key not in ("lam_h_initial", "lam_a_initial", "odds_h", "odds_d", "odds_a") else v
 
-                merged = params.get("merged_modifiers", {})
-                if merged:
-                    mod = LambdaModifiers.from_merged(
-                        merged,
-                        home_adv=params.get("home_adv", False)
+            merged = params.get("merged_modifiers", {})
+            if merged:
+                mod = LambdaModifiers.from_merged(
+                    merged,
+                    home_adv=params.get("home_adv", False)
+                )
+            else:
+                # 回退：旧格式（无 merged_modifiers）
+                mod = LambdaModifiers(
+                    attack=_f("attack"), defense=_f("defense"),
+                    tactical=_f("tactical"), coach_intent=_f("coach_intent"),
+                    scenario=_f("scenario"),
+                    home_adv=1.08 if params.get("home_adv", False) else 1.0,
+                )
+            # 3. 数学引擎推演
+            odds = None
+            try:
+                oh = float(params.get("odds_h", 0))
+                od = float(params.get("odds_d", 0))
+                oa = float(params.get("odds_a", 0))
+                if oh and od and oa:
+                    odds = (oh, od, oa)
+            except Exception:
+                pass
+            # λ 初始值：AI 提取，拒绝荒谬值（世界杯场均 0.5-3.5 球）
+            h_lam_ai = _f("lam_h_initial", 1.5)
+            a_lam_ai = _f("lam_a_initial", 1.2)
+            h_lam_ai = h_lam_ai if 0.8 <= h_lam_ai <= 4.0 else 1.5
+            a_lam_ai = a_lam_ai if 0.8 <= a_lam_ai <= 4.0 else 1.2
+            # 防平局偏向（60 场校准结论）：
+            # ratio < 1.50 时拉开差距，给平局留空间
+            ratio = h_lam_ai / (a_lam_ai + 0.01)
+            if 0.7 < ratio < 1.50:
+                delta = 0.15 if ratio < 1.30 else 0.08
+                h_lam_ai += delta
+                a_lam_ai = max(0.8, a_lam_ai - delta * 0.5)
+
+            # 硬门槛：修正后的有效 λ 不得低于 0.8
+            test_h = mod.apply(h_lam_ai, is_home=True)
+            test_a = mod.apply(a_lam_ai, is_home=False)
+            if test_h < 0.8 or test_a < 0.8:
+                mod = LambdaModifiers(home_adv=1.08 if params.get("home_adv", False) else 1.0)
+                h_lam_ai, a_lam_ai = 1.5, 1.2
+                st.warning("AI 修正因子异常（λ < 0.8），已恢复默认值。可通过校准反馈修正。")
+
+            pred = predict_match(
+                home=params.get("home_team", ""), away=params.get("away_team", ""),
+                lam_h0=h_lam_ai, lam_a0=a_lam_ai, mod=mod,
+                odds=odds,
+                lam_c=_f("lam_c", 0.01),
+                phi=_f("phi", 0.20),
+                is_knockout=is_knockout,
+            )
+            st.session_state.math_prediction = pred
+            pred.confidence *= mod.confidence
+            ko_msg = ""
+            if is_knockout:
+                if pred.locked_h == pred.locked_a:
+                    et_draw = (pred.et_score_h == pred.et_score_a)
+                    if et_draw:
+                        fw = pred.home_team if pred.pen_score_h > pred.pen_score_a else pred.away_team
+                        ko_msg = (f" | 90分 {pred.locked_h}-{pred.locked_a} → "
+                                  f"加时 {pred.et_score_h}-{pred.et_score_a}(平) → "
+                                  f"点球 {pred.pen_score_h}-{pred.pen_score_a} → {fw}晋级")
+                    else:
+                        fw = pred.home_team if pred.et_score_h > pred.et_score_a else pred.away_team
+                        ko_msg = (f" | 90分 {pred.locked_h}-{pred.locked_a} → "
+                                  f"加时 {pred.et_score_h}-{pred.et_score_a} → {fw}晋级")
+                else:
+                    winner = pred.home_team if pred.locked_h > pred.locked_a else pred.away_team
+                    ko_msg = f" | 90分钟决胜 ({winner})"
+            st.info(f"数学引擎完成 (λ_h={pred.lam_h:.2f}, λ_a={pred.lam_a:.2f}, "
+                    f"置信度 {pred.confidence*100:.0f}%{ko_msg})")
+
+        with st.spinner("正在生成推演报告..."):
+            if not merged:
+                st.info("定律库未返回修正因子，使用默认参数。可通过校准反馈逐步优化。")
+
+            modifier_info = {
+                "attack": mod.attack, "defense": mod.defense,
+                "tactical": mod.tactical, "coach_intent": mod.coach_intent,
+                "scenario": mod.scenario, "home_adv": mod.home_adv,
+                "confidence": mod.confidence,
+            }
+            for k, v in mod._extra.items():
+                modifier_info[k] = v
+
+            extra_fields = {}
+            knockout_plan = ""
+            if is_knockout:
+                if pred.locked_h == pred.locked_a:
+                    # 加时赛是否也推演为平局？
+                    et_is_draw = (pred.et_score_h == pred.et_score_a)
+                    # 最终胜方
+                    if et_is_draw:
+                        final_winner = pred.home_team if pred.pen_score_h > pred.pen_score_a else pred.away_team
+                        final_stage = "点球决胜"
+                    else:
+                        final_winner = pred.home_team if pred.et_score_h > pred.et_score_a else pred.away_team
+                        final_stage = "加时决胜"
+
+                    extra_fields = {
+                        "比赛类型": "淘汰赛",
+                        "90分钟": f"{pred.locked_h}-{pred.locked_a} (平局 → 加时)",
+                        "加时赛比分": f"{pred.et_score_h}-{pred.et_score_a}" + (" (平局 → 点球)" if et_is_draw else ""),
+                        "最终胜方": f"{final_winner} ({final_stage})",
+                    }
+                    if et_is_draw:
+                        extra_fields["点球比分"] = f"{pred.pen_score_h}-{pred.pen_score_a}"
+                    extra_fields["主队晋级概率"] = f"{pred.home_advance*100:.1f}%"
+                    extra_fields["客队晋级概率"] = f"{pred.away_advance*100:.1f}%"
+
+                    chain = f"90分钟 {pred.locked_h}-{pred.locked_a} → 加时 {pred.et_score_h}-{pred.et_score_a}"
+                    if et_is_draw:
+                        chain += f" (仍平) → 点球 {pred.pen_score_h}-{pred.pen_score_a} → {final_winner} 晋级"
+                    else:
+                        chain += f" → {final_winner} 晋级"
+                    knockout_plan = (
+                        f"**【淘汰赛推演链】**\n{chain}\n\n"
                     )
                 else:
-                    # 回退：旧格式（无 merged_modifiers）
-                    mod = LambdaModifiers(
-                        attack=_f("attack"), defense=_f("defense"),
-                        tactical=_f("tactical"), coach_intent=_f("coach_intent"),
-                        scenario=_f("scenario"),
-                        home_adv=1.08 if params.get("home_adv", False) else 1.0,
+                    winner = pred.home_team if pred.locked_h > pred.locked_a else pred.away_team
+                    extra_fields = {
+                        "比赛类型": "淘汰赛 — 90分钟分出胜负",
+                        "推演胜方": winner,
+                        "不需加时": True,
+                    }
+                    knockout_plan = (
+                        f"**【淘汰赛】**\n"
+                        f"推演 90 分钟结果为 {pred.locked_h}-{pred.locked_a}，{winner} 胜，不需加时。\n\n"
                     )
-                # 3. 数学引擎推演
-                odds = None
-                try:
-                    oh = float(params.get("odds_h", 0))
-                    od = float(params.get("odds_d", 0))
-                    oa = float(params.get("odds_a", 0))
-                    if oh and od and oa:
-                        odds = (oh, od, oa)
-                except Exception:
-                    pass
-                # λ 初始值：AI 提取，拒绝荒谬值（世界杯场均 0.5-3.5 球）
-                h_lam_ai = _f("lam_h_initial", 1.5)
-                a_lam_ai = _f("lam_a_initial", 1.2)
-                h_lam_ai = h_lam_ai if 0.8 <= h_lam_ai <= 4.0 else 1.5
-                a_lam_ai = a_lam_ai if 0.8 <= a_lam_ai <= 4.0 else 1.2
-                # 防平局偏向（60 场校准结论）：
-                # ratio < 1.50 时拉开差距，给平局留空间
-                ratio = h_lam_ai / (a_lam_ai + 0.01)
-                if 0.7 < ratio < 1.50:
-                    delta = 0.15 if ratio < 1.30 else 0.08
-                    h_lam_ai += delta
-                    a_lam_ai = max(0.8, a_lam_ai - delta * 0.5)
+            math_json = json.dumps({
+                "锁定比分": f"{pred.locked_h}-{pred.locked_a} (90分钟常规时间)",
+                "主队": pred.home_team, "客队": pred.away_team,
+                "主队λ": round(pred.lam_h, 2), "客队λ": round(pred.lam_a, 2),
+                "期望进球": f"{pred.exp_h:.2f} - {pred.exp_a:.2f}",
+                "主胜": f"{pred.home_win*100:.1f}%",
+                "平局": f"{pred.draw*100:.1f}%",
+                "客胜": f"{pred.away_win*100:.1f}%",
+                "比分概率": [f"{h}-{a} ({p*100:.1f}%)" for (h, a), p in pred.top_scores[:5]],
+                "模型置信度": f"{pred.confidence*100:.0f}%",
+                "定律修正因子": modifier_info,
+                **extra_fields,
+            }, ensure_ascii=False, indent=2)
 
-                # 硬门槛：修正后的有效 λ 不得低于 0.8
-                test_h = mod.apply(h_lam_ai, is_home=True)
-                test_a = mod.apply(a_lam_ai, is_home=False)
-                if test_h < 0.8 or test_a < 0.8:
-                    mod = LambdaModifiers(home_adv=1.08 if params.get("home_adv", False) else 1.0)
-                    h_lam_ai, a_lam_ai = 1.5, 1.2
-                    st.warning("AI 修正因子异常（λ < 0.8），已恢复默认值。可通过校准反馈修正。")
+            analysis_query = (
+                f"赛前数据报告:\n{st.session_state.search_report[:8000]}\n\n"
+                f"数学模型计算结果 (Python 引擎):\n{math_json}\n\n"
+                f"**【教练意图评级要求】**\n"
+                f"从赛前数据报告中的「教练发言」和「首发阵容」揣摩双方教练的进攻意图，"
+                f"按 L1-L5 评级（L1=极度保守, L2=谨慎, L3=均衡, L4=主动, L5=全力压上）。"
+                f"必须写明评级依据。如果赛前数据中搜索不到教练发言，请标 L3 并注明「暂无赛前发言数据」。\n\n"
+                + knockout_plan +
+                f"**【最高优先级】报告中必须使用以上「锁定比分」字段的值作为最终推演比分。"
+                f"你不得修改、重新计算、或给出任何其他比分预测。**\n"
+                f"请基于以上信息生成推演报告。"
+            )
+            if training_mode:
+                analysis_query = "注意：这是一场已结束的历史比赛，请忽略最终比分，模拟赛前视角。\n" + analysis_query
 
-                pred = predict_match(
-                    home=params.get("home_team", ""), away=params.get("away_team", ""),
-                    lam_h0=h_lam_ai, lam_a0=a_lam_ai, mod=mod,
-                    odds=odds,
-                    lam_c=_f("lam_c", 0.01),
-                    phi=_f("phi", 0.20),
-                    is_knockout=is_knockout,
-                )
-                st.session_state.math_prediction = pred
-                pred.confidence *= mod.confidence
-                ko_msg = ""
-                if is_knockout:
-                    if pred.locked_h == pred.locked_a:
-                        et_draw = (pred.et_score_h == pred.et_score_a)
-                        if et_draw:
-                            fw = pred.home_team if pred.pen_score_h > pred.pen_score_a else pred.away_team
-                            ko_msg = (f" | 90分 {pred.locked_h}-{pred.locked_a} → "
-                                      f"加时 {pred.et_score_h}-{pred.et_score_a}(平) → "
-                                      f"点球 {pred.pen_score_h}-{pred.pen_score_a} → {fw}晋级")
-                        else:
-                            fw = pred.home_team if pred.et_score_h > pred.et_score_a else pred.away_team
-                            ko_msg = (f" | 90分 {pred.locked_h}-{pred.locked_a} → "
-                                      f"加时 {pred.et_score_h}-{pred.et_score_a} → {fw}晋级")
-                    else:
-                        winner = pred.home_team if pred.locked_h > pred.locked_a else pred.away_team
-                        ko_msg = f" | 90分钟决胜 ({winner})"
-                st.info(f"数学引擎完成 (λ_h={pred.lam_h:.2f}, λ_a={pred.lam_a:.2f}, "
-                        f"置信度 {pred.confidence*100:.0f}%{ko_msg})")
-
-            with st.spinner("正在生成推演报告..."):
-                if not merged:
-                    st.info("定律库未返回修正因子，使用默认参数。可通过校准反馈逐步优化。")
-
-                modifier_info = {
-                    "attack": mod.attack, "defense": mod.defense,
-                    "tactical": mod.tactical, "coach_intent": mod.coach_intent,
-                    "scenario": mod.scenario, "home_adv": mod.home_adv,
-                    "confidence": mod.confidence,
-                }
-                for k, v in mod._extra.items():
-                    modifier_info[k] = v
-
-                extra_fields = {}
-                knockout_plan = ""
-                if is_knockout:
-                    if pred.locked_h == pred.locked_a:
-                        # 加时赛是否也推演为平局？
-                        et_is_draw = (pred.et_score_h == pred.et_score_a)
-                        # 最终胜方
-                        if et_is_draw:
-                            final_winner = pred.home_team if pred.pen_score_h > pred.pen_score_a else pred.away_team
-                            final_stage = "点球决胜"
-                        else:
-                            final_winner = pred.home_team if pred.et_score_h > pred.et_score_a else pred.away_team
-                            final_stage = "加时决胜"
-
-                        extra_fields = {
-                            "比赛类型": "淘汰赛",
-                            "90分钟": f"{pred.locked_h}-{pred.locked_a} (平局 → 加时)",
-                            "加时赛比分": f"{pred.et_score_h}-{pred.et_score_a}" + (" (平局 → 点球)" if et_is_draw else ""),
-                            "最终胜方": f"{final_winner} ({final_stage})",
-                        }
-                        if et_is_draw:
-                            extra_fields["点球比分"] = f"{pred.pen_score_h}-{pred.pen_score_a}"
-                        extra_fields["主队晋级概率"] = f"{pred.home_advance*100:.1f}%"
-                        extra_fields["客队晋级概率"] = f"{pred.away_advance*100:.1f}%"
-
-                        chain = f"90分钟 {pred.locked_h}-{pred.locked_a} → 加时 {pred.et_score_h}-{pred.et_score_a}"
-                        if et_is_draw:
-                            chain += f" (仍平) → 点球 {pred.pen_score_h}-{pred.pen_score_a} → {final_winner} 晋级"
-                        else:
-                            chain += f" → {final_winner} 晋级"
-                        knockout_plan = (
-                            f"**【淘汰赛推演链】**\n{chain}\n\n"
-                        )
-                    else:
-                        winner = pred.home_team if pred.locked_h > pred.locked_a else pred.away_team
-                        extra_fields = {
-                            "比赛类型": "淘汰赛 — 90分钟分出胜负",
-                            "推演胜方": winner,
-                            "不需加时": True,
-                        }
-                        knockout_plan = (
-                            f"**【淘汰赛】**\n"
-                            f"推演 90 分钟结果为 {pred.locked_h}-{pred.locked_a}，{winner} 胜，不需加时。\n\n"
-                        )
-                math_json = json.dumps({
-                    "锁定比分": f"{pred.locked_h}-{pred.locked_a} (90分钟常规时间)",
-                    "主队": pred.home_team, "客队": pred.away_team,
-                    "主队λ": round(pred.lam_h, 2), "客队λ": round(pred.lam_a, 2),
-                    "期望进球": f"{pred.exp_h:.2f} - {pred.exp_a:.2f}",
-                    "主胜": f"{pred.home_win*100:.1f}%",
-                    "平局": f"{pred.draw*100:.1f}%",
-                    "客胜": f"{pred.away_win*100:.1f}%",
-                    "比分概率": [f"{h}-{a} ({p*100:.1f}%)" for (h, a), p in pred.top_scores[:5]],
-                    "模型置信度": f"{pred.confidence*100:.0f}%",
-                    "定律修正因子": modifier_info,
-                    **extra_fields,
-                }, ensure_ascii=False, indent=2)
-
-                analysis_query = (
-                    f"赛前数据报告:\n{st.session_state.search_report[:8000]}\n\n"
-                    f"数学模型计算结果 (Python 引擎):\n{math_json}\n\n"
-                    f"**【教练意图评级要求】**\n"
-                    f"从赛前数据报告中的「教练发言」和「首发阵容」揣摩双方教练的进攻意图，"
-                    f"按 L1-L5 评级（L1=极度保守, L2=谨慎, L3=均衡, L4=主动, L5=全力压上）。"
-                    f"必须写明评级依据。如果赛前数据中搜索不到教练发言，请标 L3 并注明「暂无赛前发言数据」。\n\n"
-                    + knockout_plan +
-                    f"**【最高优先级】报告中必须使用以上「锁定比分」字段的值作为最终推演比分。"
-                    f"你不得修改、重新计算、或给出任何其他比分预测。**\n"
-                    f"请基于以上信息生成推演报告。"
-                )
-                if training_mode:
-                    analysis_query = "注意：这是一场已结束的历史比赛，请忽略最终比分，模拟赛前视角。\n" + analysis_query
-
+            result = _deepseek_chat(_ANALYSIS_FROM_JSON_PROMPT, analysis_query,
+                                    model=MODEL_ANALYSIS)
+            if not result:
+                # v4-pro/max 超时 → 回退 chat 模型
+                st.warning("推演模型超时，切换备用模型重试...")
                 result = _deepseek_chat(_ANALYSIS_FROM_JSON_PROMPT, analysis_query,
-                                        model=MODEL_ANALYSIS)
-                if not result:
-                    # v4-pro/max 超时 → 回退 chat 模型
-                    st.warning("推演模型超时，切换备用模型重试...")
-                    result = _deepseek_chat(_ANALYSIS_FROM_JSON_PROMPT, analysis_query,
-                                            model=MODEL_SEARCH)
-                if result:
-                    st.session_state.analysis_report = result
-                    st.session_state.math_json = math_json
-                    save_record(match, st.session_state.search_report, st.session_state.analysis_report)
-                    st.success("推演记录已保存至云端数据库。")
-                else:
-                    st.error("推演报告生成失败，请重试。")
-        elif not match:
-            st.warning("请先输入比赛名称")
-        else:
-            st.warning("请先搜集赛前数据")
+                                        model=MODEL_SEARCH)
+            if result:
+                st.session_state.analysis_report = result
+                st.session_state.math_json = math_json
+                save_record(match, st.session_state.search_report, st.session_state.analysis_report)
+                st.success("推演记录已保存至云端数据库。")
+            else:
+                st.error("推演报告生成失败，请重试。")
+    elif not match:
+        st.warning("请先输入比赛名称")
+    else:
+        st.warning("请先搜集赛前数据")
 
 # ============ 实时结果显示区域 ============
 if st.session_state.search_report:
     with st.expander("📡 信息雷达：赛前数据报告", expanded=True):
         st.markdown(st.session_state.search_report)
 
+# 核心信息突出展示
+if st.session_state.get("math_json"):
+    mj = st.session_state.math_json
+    score = mj.get("锁定比分", "?-?")
+    home = mj.get("主队", "?")
+    away = mj.get("客队", "?")
+    hw = mj.get("主胜", "?")
+    dr = mj.get("平局", "?")
+    aw = mj.get("客胜", "?")
+    conf = mj.get("模型置信度", "?")
+    st.markdown(f"""
+    <div style="text-align:center; padding:1.5em; background:var(--secondary-background-color); border-radius:12px; margin-bottom:1em;">
+        <div style="font-size:1.1em; font-weight:500; margin-bottom:8px;">{home} vs {away}</div>
+        <div style="font-size:3em; font-weight:700; letter-spacing:4px;">{score}</div>
+        <div style="font-size:0.9em; margin-top:8px; color:gray;">{hw} | {dr} | {aw} &nbsp; 置信度 {conf}</div>
+    </div>
+    """, unsafe_allow_html=True)
+    # 加时/点球详情
+    if mj.get("主队晋级概率"):
+        st.markdown(f"🏆 晋级概率: 主队 {mj['主队晋级概率']} / 客队 {mj['客队晋级概率']}", help=f"加时 {mj.get('加时赛比分','?')} 点球 {mj.get('点球比分','未触发')}")
+
 if st.session_state.analysis_report:
-    with st.expander("🧠 推演引擎：全维推演报告", expanded=True):
+    with st.expander("🧠 推演引擎：全维推演报告", expanded=False):
         st.markdown(st.session_state.analysis_report)
 
 # ============ 赛后校准 ============
