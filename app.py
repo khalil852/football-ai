@@ -1635,22 +1635,31 @@ st.session_state.training_mode = training_mode
 if st.button("⚡ 一键推演", use_container_width=True, type="primary",
               help="自动完成搜索+推演，适合快速查看预测", key="one_click_predict"):
     if match:
-        prog = st.progress(0, text="🔍 正在搜索并汇总数据...")
+        prog = st.progress(0, text="⏳ 正在生成推演报告，请稍候...")
+        bar_running = True
+        def fill_bar():
+            pct = 0.0
+            while bar_running and pct < 0.95:
+                time.sleep(2)
+                pct = min(pct + 0.08, 0.95)
+                prog.progress(pct, text="⏳ 正在生成推演报告，请稍候...")
+        import threading
+        t = threading.Thread(target=fill_bar, daemon=True)
+        t.start()
         try:
             sq = f"请为 {match} 搜集赛前关键信息，并严格按照模板格式输出。" if not training_mode else \
                  f"请为 {match} 搜集比赛的赛前关键信息（首发阵容、伤病、赔率、历史交锋、教练发言、出线形势），并严格按照模板格式输出。请注意：这是一场已经结束的比赛，但请只搜集「赛前」信息，不要包含最终比分或赛后数据。"
             search_result = call_deepseek(system_prompt_search, sq, enable_search=True, search_mode="pre_match", model=MODEL_SEARCH)
             if not search_result:
-                prog.empty(); st.warning("搜索未返回结果，请检查比赛名称或重试。"); st.stop()
+                bar_running = False; prog.empty(); st.warning("搜索未返回结果。"); st.stop()
             st.session_state.search_report = search_result
             st.session_state.current_match = match
             et = extract_match_time(search_result)
             if et: st.session_state.current_match_time = et
             elif training_mode: st.session_state.current_match_time = "2000-01-01 00:00"
         except Exception as e:
-            prog.empty(); st.error(f"搜索出错: {str(e)[:80]}"); st.stop()
+            bar_running = False; prog.empty(); st.error(f"搜索出错: {str(e)[:80]}"); st.stop()
 
-        prog.progress(0.4, text="🧮 正在提取参数并运行数学引擎...（预计 20-40 秒）")
         try:
             params = _extract_params(search_result, laws_data.get("laws",[]))
             def ok(key, d=1.0):
@@ -1671,7 +1680,6 @@ if st.button("⚡ 一键推演", use_container_width=True, type="primary",
                 d = 0.15 if r<1.30 else 0.08; h0+=d; a0=max(0.8,a0-d*0.5)
             pred = predict_match(home=params.get("home_team",""),away=params.get("away_team",""),lam_h0=h0,lam_a0=a0,mod=mod,odds=odds,lam_c=ok("lam_c",0.01),phi=ok("phi",0.20),is_knockout=is_knockout)
             st.session_state.math_prediction=pred; pred.confidence*=mod.confidence
-            prog.progress(0.7, text="📝 正在生成推演报告...")
             mi = {k:getattr(mod,k) for k in ("attack","defense","tactical","coach_intent","scenario","home_adv","confidence")}; mi.update(mod._extra)
             ef = {}
             if is_knockout and pred.locked_h==pred.locked_a:
@@ -1682,17 +1690,17 @@ if st.button("⚡ 一键推演", use_container_width=True, type="primary",
             aq = f"赛前数据报告:\n{search_result[:8000]}\n\n数学模型计算结果:\n{mj}\n\n**【教练意图评级要求】**\n从赛前数据报告中的「教练发言」和「首发阵容」揣摩双方教练的进攻意图，按 L1-L5 评级。必须写明评级依据。\n\n**【最高优先级】报告中必须使用以上「锁定比分」字段的值作为最终推演比分。**\n"
             result = _deepseek_chat(_ANALYSIS_FROM_JSON_PROMPT, aq, model=MODEL_ANALYSIS)
             if not result:
-                prog.progress(0.85, text="🔄 备用模型重试..."); result = _deepseek_chat(_ANALYSIS_FROM_JSON_PROMPT, aq, model=MODEL_SEARCH)
+                bar_running = False; prog.progress(0.85, text="🔄 备用模型重试...")
+                result = _deepseek_chat(_ANALYSIS_FROM_JSON_PROMPT, aq, model=MODEL_SEARCH)
             if result:
-                st.session_state.analysis_report = result; st.session_state.math_json = mj
-                save_record(match, search_result, result)
+                bar_running = False; st.session_state.analysis_report = result
+                st.session_state.math_json = mj; save_record(match, search_result, result)
                 prog.progress(1.0, text="✅ 推演完成！")
-                time.sleep(0.5)
-                prog.empty(); st.rerun()
+                time.sleep(0.5); prog.empty(); st.rerun()
             else:
-                prog.empty(); st.error("推演报告生成失败，请重试。")
+                bar_running = False; prog.empty(); st.error("推演报告生成失败，请重试。")
         except Exception as e:
-            prog.empty(); st.error(f"推演出错: {str(e)[:80]}")
+            bar_running = False; prog.empty(); st.error(f"推演出错: {str(e)[:80]}")
     else:
         st.warning("请先输入比赛名称")
 
