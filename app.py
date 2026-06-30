@@ -713,10 +713,16 @@ def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
                   is_knockout: bool = False) -> MatchPrediction:
     lh = mod.apply(lam_h0, is_home=True)
     la = mod.apply(lam_a0, is_home=False)
-    # 调参层已禁用，等待你的测试结果后再决定如何处理
-    # lh, la = _adjust_lambda(lh, la, is_knockout)
-
-    probs = _full_model(lh, la, lam_c, phi, max_g) if is_knockout else _std_poisson(lh, la, max_g)
+    # 标准独立泊松，零补丁
+    probs = {}
+    for h in range(max_g + 1):
+        ph = math.exp(-lh) * lh**h / math.factorial(h)
+        for a in range(max_g + 1):
+            pa = math.exp(-la) * la**a / math.factorial(a)
+            probs[(h, a)] = ph * pa
+    total = sum(probs.values())
+    if total > 0:
+        probs = {k: v / total for k, v in probs.items()}
 
     hw = dw = aw = eh = ea = 0.0
     for (h, a), p in probs.items():
@@ -728,55 +734,6 @@ def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
     top = sorted(probs.items(), key=lambda x: x[1], reverse=True)[:5]
     locked_h, locked_a = top[0][0] if top else (round(eh), round(ea))
 
-    # ---- 淘汰赛加时+点球推演 ----
-    home_adv = hw; away_adv = aw
-    extra_time_pct = 0.0; penalties_pct = 0.0
-    et_score_h, et_score_a = 0, 0
-    pen_score_h, pen_score_a = 0, 0
-    et_winner = ""
-    pen_winner = ""
-    draw_at_90 = (locked_h == locked_a)
-
-    if is_knockout and draw_at_90:
-        lam_ratio = min(max(lh / (la + 0.01), 0.6), 1.6)
-        extra_time_pct = dw
-        extra_resolve = dw * 0.65
-        penalties_pct = dw * 0.35
-
-        et_lam_h = lh * 0.33
-        et_lam_a = la * 0.33
-        et_probs = _bivariate_poisson(et_lam_h, et_lam_a, lam_c, max_g=4)
-        et_hw = et_dw = et_aw = 0.0
-        et_top = []
-        for (h, a), p in et_probs.items():
-            if h > a: et_hw += p
-            elif h == a: et_dw += p
-            else: et_aw += p
-        et_top = sorted(et_probs.items(), key=lambda x: x[1], reverse=True)[:3]
-        if et_top:
-            et_score_h, et_score_a = et_top[0][0]
-        et_home_bias = et_hw / (et_hw + et_aw + 0.01)  # 加时赛胜率偏差
-        et_winner = "主" if et_home_bias > 0.5 else "客"
-
-        # ---- 点球大战推演 ----
-        # 永远有胜方。bias 范围 ~0.44-0.56 → 分差 1-3 球
-        pen_home_bias = 0.5 + 0.08 * math.log(lam_ratio)
-        pen_gap = max(1, round(abs(pen_home_bias - 0.5) * 50))  # 0.02→1, 0.04→2, 0.06→3
-        if pen_home_bias > 0.50:
-            pen_score_h = 3 + pen_gap
-            pen_score_a = 3
-        else:
-            pen_score_h = 3
-            pen_score_a = 3 + pen_gap
-
-        pen_away_bias = 1.0 - pen_home_bias
-        home_adv = hw + extra_resolve * et_home_bias + penalties_pct * pen_home_bias
-        away_adv = aw + extra_resolve * (1 - et_home_bias) + penalties_pct * pen_away_bias
-    else:
-        # 推演 90 分钟分出胜负 → 无加时，晋级=胜方
-        home_adv = hw
-        away_adv = aw
-
     conf = 1.0
     if odds:
         imp_h, imp_d, imp_a, _ = _implied_probs(*odds)
@@ -787,12 +744,7 @@ def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
                            home_win=hw, draw=dw, away_win=aw,
                            exp_h=eh, exp_a=ea, top_scores=top, confidence=conf,
                            locked_h=locked_h, locked_a=locked_a,
-                           is_knockout=is_knockout,
-                           home_advance=home_adv, away_advance=away_adv,
-                           extra_time_pct=extra_time_pct, penalties_pct=penalties_pct,
-                           et_score_h=et_score_h, et_score_a=et_score_a,
-                           pen_score_h=pen_score_h, pen_score_a=pen_score_a)
-
+                           is_knockout=is_knockout)
 
 # ---- 赛后校准 ----
 def calibrate_math(pred: MatchPrediction, actual_h: int, actual_a: int,
