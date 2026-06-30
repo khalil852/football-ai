@@ -662,7 +662,7 @@ def _implied_probs(odds_h: float, odds_d: float, odds_a: float) -> Tuple[float, 
 # ---- 核心推演 ----
 def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
                   mod: LambdaModifiers, odds: Tuple[float, float, float] = None,
-                  lam_c: float = 0.02, phi: float = 0.15, max_g: int = 8,
+                  lam_c: float = 0.01, phi: float = 0.20, max_g: int = 8,
                   is_knockout: bool = False) -> MatchPrediction:
     lh = mod.apply(lam_h0, is_home=True)
     la = mod.apply(lam_a0, is_home=False)
@@ -798,7 +798,7 @@ _LAW_WEIGHT_MAP_PROMPT = (
     "λ 必须在 0.8-3.5 范围内（世界杯球队场均进 0.5-3.5 球）。\n"
     "输出 JSON: {\"merged_modifiers\": {\"attack\": 0.85, ...}, "
     "\"lam_h_initial\": 1.5, \"lam_a_initial\": 1.3, "
-    "\"phi\": 0.15, \"lam_c\": 0.02, \"home_adv\": true, "
+    "\"phi\": 0.20, \"lam_c\": 0.01, \"home_adv\": true, "
     "\"odds_h\": null, \"odds_d\": null, \"odds_a\": null, "
     "\"triggered\": [\"匹配的定律名1\"], \"summary\": \"一句话\"}\n"
     "仅输出 JSON，不要解释。"
@@ -813,7 +813,7 @@ _LAW_WEIGHT_PROMPT_FALLBACK = (
     "λ 初始值必须在 0.8-3.5（世界杯场均 0.5-3.5 球）。\n"
     "输出 JSON: {\"merged_modifiers\": {\"attack\": 0.85, ...}, "
     "\"lam_h_initial\": 1.5, \"lam_a_initial\": 1.3, "
-    "\"phi\": 0.15, \"lam_c\": 0.02, \"home_adv\": true, "
+    "\"phi\": 0.20, \"lam_c\": 0.01, \"home_adv\": true, "
     "\"odds_h\": null, \"odds_d\": null, \"odds_a\": null}\n"
     "仅输出 JSON，不要解释。"
 )
@@ -1665,11 +1665,13 @@ with col2:
                 a_lam_ai = _f("lam_a_initial", 1.2)
                 h_lam_ai = h_lam_ai if 0.8 <= h_lam_ai <= 4.0 else 1.5
                 a_lam_ai = a_lam_ai if 0.8 <= a_lam_ai <= 4.0 else 1.2
-                # 防平局偏向：如果 AI 给出的两队 λ 太接近（ratio < 1.2），
-                # 轻微拉开差距（强队+0.1，弱队-0.05）
-                if 0.85 < h_lam_ai / (a_lam_ai + 0.01) < 1.20:
-                    h_lam_ai += 0.1
-                    a_lam_ai = max(0.8, a_lam_ai - 0.05)
+                # 防平局偏向（60 场校准结论）：
+                # ratio < 1.50 时拉开差距，给平局留空间
+                ratio = h_lam_ai / (a_lam_ai + 0.01)
+                if 0.7 < ratio < 1.50:
+                    delta = 0.15 if ratio < 1.30 else 0.08
+                    h_lam_ai += delta
+                    a_lam_ai = max(0.8, a_lam_ai - delta * 0.5)
 
                 # 硬门槛：修正后的有效 λ 不得低于 0.8
                 test_h = mod.apply(h_lam_ai, is_home=True)
@@ -1683,8 +1685,8 @@ with col2:
                     home=params.get("home_team", ""), away=params.get("away_team", ""),
                     lam_h0=h_lam_ai, lam_a0=a_lam_ai, mod=mod,
                     odds=odds,
-                    lam_c=_f("lam_c", 0.02),
-                    phi=_f("phi", 0.15),
+                    lam_c=_f("lam_c", 0.01),
+                    phi=_f("phi", 0.20),
                     is_knockout=is_knockout,
                 )
                 st.session_state.math_prediction = pred
