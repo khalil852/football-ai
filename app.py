@@ -1641,10 +1641,6 @@ if "training_mode" not in st.session_state:
 st.session_state.training_mode = training_mode
 
 # 一键推演（两步连跑）
-one_click = st.button("⚡ 一键推演", use_container_width=True, type="primary",
-                      help="自动完成搜索+推演，适合快速查看预测")
-
-# 一键推演（搜索 + 推演连跑）
 if st.button("⚡ 一键推演", use_container_width=True, type="primary",
               help="自动完成搜索+推演，适合快速查看预测", key="one_click_predict"):
     if match:
