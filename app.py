@@ -913,6 +913,8 @@ def _laws_to_modifiers(search_report: str, laws: list) -> dict:
             if triggered:
                 aggro_label = f" [{'保守' if aggro < 1.0 else '激进'} ×{aggro:.1f}]" if aggro != 1.0 else ""
                 st.info(f"📋 触发 {len(triggered)}/{len(active_laws)} 条定律{aggro_label}: {', '.join(triggered[:5])}")
+            # 保存触发的定律名到 session_state，供校准阶段更新准确率
+            st.session_state["last_triggered_laws"] = triggered
             return result
     except Exception:
         pass
@@ -1436,6 +1438,29 @@ def calibrate_record(record, max_attempts=3):
         "pending_laws": json.dumps(new_laws) if new_laws else None,
         "pending_modifications": json.dumps(modified_laws) if modified_laws else None
     }).eq("id", record["id"]).execute()
+
+    # ---- 第六步：更新触发的定律的准确率 ----
+    triggered_names = st.session_state.get("last_triggered_laws", [])
+    if triggered_names and math_cal:
+        # 判断推演是否命中胜负或比分
+        prediction_correct = math_cal.result_match or math_cal.score_match
+        for tname in triggered_names:
+            try:
+                # 用 supabase 查该用户下的定律名
+                hits = supabase.table("laws").select("id,triggers_count,correct_count")\
+                    .eq("username", st.session_state.username)\
+                    .eq("name", tname)\
+                    .execute()
+                if hits.data:
+                    law = hits.data[0]
+                    new_trig = (law.get("triggers_count") or 0) + 1
+                    new_cor = (law.get("correct_count") or 0) + (1 if prediction_correct else 0)
+                    supabase.table("laws").update({
+                        "triggers_count": new_trig,
+                        "correct_count": new_cor
+                    }).eq("id", law["id"]).execute()
+            except Exception:
+                pass
 
     return True, calibration_report, new_laws, modified_laws
 
@@ -1966,6 +1991,13 @@ with st.expander("查看/管理所有定律", expanded=False):
                 st.markdown(f"· {law['content']}")
                 st.markdown(f"· 触发条件：{law.get('trigger_condition', '暂无')}")
                 st.markdown(f"· λ值修正：{law.get('lambda_effect', '暂无')}")
+                # 显示使用准确率
+                tc = law.get("triggers_count") or 0
+                cc = law.get("correct_count") or 0
+                if tc > 0:
+                    acc = round(cc / tc * 100)
+                    bar = "█" * (acc // 10) + "░" * (10 - acc // 10)
+                    st.markdown(f"· 使用 {tc} 次 | 正确 {cc} 次 | 准确率 **{acc}%** {bar}")
             
             with col_delete:
                 if st.button("🗑️", key=f"delete_law_{law['id']}", help="删除此定律"):
