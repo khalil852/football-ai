@@ -1646,7 +1646,7 @@ one_click = st.button("⚡ 一键推演", use_container_width=True, type="primar
 
 # 一键推演（搜索 + 推演连跑）
 if st.button("⚡ 一键推演", use_container_width=True, type="primary",
-              help="自动完成搜索+推演，适合快速查看预测"):
+              help="自动完成搜索+推演，适合快速查看预测", key="one_click_predict"):
     if match:
         pbar = st.empty()
         pbar.info("🔍 正在搜索并汇总数据...")
