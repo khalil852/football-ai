@@ -668,12 +668,17 @@ def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
                   is_knockout: bool = False) -> MatchPrediction:
     lh = mod.apply(lam_h0, is_home=True)
     la = mod.apply(lam_a0, is_home=False)
-    # 防平局：λ 值太接近时会拉大差距
-    ratio = lh / (la + 0.01)
-    if not is_knockout and 0.65 < ratio < 1.55:
-        delta = 0.12
-        lh += delta
-        la = max(0.7, la - delta * 0.5)
+    # 防平局：确保强弱队 λ 有足够差距
+    if not is_knockout:
+        diff = lh - la
+        if diff < 0.08:
+            add = 0.18
+            if lh > la: lh += add; la = max(0.7, la - add * 0.3)
+            else: la += add; lh = max(0.7, lh - add * 0.3)
+        elif diff < 0.45:
+            add = 0.18
+            lh += add
+            la = max(0.7, la - add * 0.6)
     if is_knockout:
         probs = _bivariate_poisson(lh, la, lam_c, max_g)
         if phi > 0.01:
