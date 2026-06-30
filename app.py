@@ -668,8 +668,12 @@ def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
                   is_knockout: bool = False) -> MatchPrediction:
     lh = mod.apply(lam_h0, is_home=True)
     la = mod.apply(lam_a0, is_home=False)
-    # 50场校准结论：标准独立泊松最佳（比分10%、偏差2.10）
-    # 双变量泊松仅用于淘汰赛场景（关联项对平局推演有意义）
+    # 防平局：λ 值太接近时会拉大差距
+    ratio = lh / (la + 0.01)
+    if not is_knockout and 0.65 < ratio < 1.55:
+        delta = 0.12
+        lh += delta
+        la = max(0.7, la - delta * 0.5)
     if is_knockout:
         probs = _bivariate_poisson(lh, la, lam_c, max_g)
         if phi > 0.01:
@@ -1675,9 +1679,6 @@ if st.button("⚡ 一键推演", use_container_width=True, type="primary",
             except: pass
             h0 = max(0.8,min(4.0,ok("lam_h_initial",1.5)))
             a0 = max(0.8,min(4.0,ok("lam_a_initial",1.2)))
-            r = h0/(a0+0.01)
-            if 0.7<r<1.50:
-                d = 0.15 if r<1.30 else 0.08; h0+=d; a0=max(0.8,a0-d*0.5)
             pred = predict_match(home=params.get("home_team",""),away=params.get("away_team",""),lam_h0=h0,lam_a0=a0,mod=mod,odds=odds,lam_c=ok("lam_c",0.01),phi=ok("phi",0.20),is_knockout=is_knockout)
             st.session_state.math_prediction=pred; pred.confidence*=mod.confidence
             mi = {k:getattr(mod,k) for k in ("attack","defense","tactical","coach_intent","scenario","home_adv","confidence")}; mi.update(mod._extra)
