@@ -1932,7 +1932,12 @@ if st.session_state.search_report:
 
 # 核心信息突出展示
 if st.session_state.get("math_json"):
-    mj = st.session_state.math_json
+    mj_raw = st.session_state.math_json
+    if isinstance(mj_raw, str):
+        try: mj = json.loads(mj_raw)
+        except: mj = {}
+    else:
+        mj = mj_raw
     score = mj.get("锁定比分", "?-?")
     home = mj.get("主队", "?")
     away = mj.get("客队", "?")
