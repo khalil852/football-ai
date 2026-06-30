@@ -713,9 +713,9 @@ def predict_match(home: str, away: str, lam_h0: float, lam_a0: float,
                   is_knockout: bool = False) -> MatchPrediction:
     lh = mod.apply(lam_h0, is_home=True)
     la = mod.apply(lam_a0, is_home=False)
-    # 调参层（所有启发式补丁）
-    lh, la = _adjust_lambda(lh, la, is_knockout)
-    # 数学层（零补丁）
+    # 调参层已禁用，等待你的测试结果后再决定如何处理
+    # lh, la = _adjust_lambda(lh, la, is_knockout)
+
     probs = _full_model(lh, la, lam_c, phi, max_g) if is_knockout else _std_poisson(lh, la, max_g)
 
     hw = dw = aw = eh = ea = 0.0
