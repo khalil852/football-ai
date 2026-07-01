@@ -131,8 +131,10 @@ st.set_page_config(page_title="全维推演工厂", page_icon="⚽", layout="wid
 st.markdown("""
 <style>
     /* 全局样式 */
-    .stApp { background: #0e1117; }
+    .stApp { background: #0e1117; color: #e8ecf4 !important; }
     .main > .block-container { max-width: 900px; padding-top: 1rem; }
+    p, span, div, li, h1, h2, h3, h4, h5 { color: #e8ecf4; }
+    .stMarkdown, .stText { color: #e8ecf4 !important; }
 
     /* 卡片容器 */
     div[data-testid="stExpander"] {
