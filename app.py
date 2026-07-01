@@ -39,8 +39,6 @@ SUPABASE_KEY = _secret("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 DEFAULT_DEEPSEEK_KEY = _secret("default_deepseek_key")
-TAVILY_API_KEY = _secret("default_tavily_key")
-TAVILY_URL = "https://api.tavily.com/search"
 
 # ============ System Prompts（优先 secrets，回退本地文件）============
 def _load_prompt(secret_name, filename):
@@ -1030,44 +1028,32 @@ def _parse_teams(query):
     return None, None
 
 
-# ============ Tavily 搜索（所有数据来源）============
+# ============ 百度搜索（国内免费，无需 Key）============
 @st.cache_data(ttl=3600, show_spinner=False)
-def _cached_tavily(query):
-    """缓存 Tavily 结果，相同 query 1 小时内不重复搜索"""
-    return _tavily_search(query)
+def _cached_baidu(query):
+    """缓存百度搜索结果，相同 query 1 小时内不重复搜索"""
+    return _baidu_search(query)
 
 
-def _tavily_search(query):
-    """Tavily 搜索，返回格式化结果"""
+def _baidu_search(query):
+    """百度搜索，返回格式化结果。免费，无需 API Key"""
     try:
-        resp = requests.post(
-            TAVILY_URL,
-            headers={"Content-Type": "application/json"},
-            json={
-                "api_key": TAVILY_API_KEY,
-                "query": query,
-                "search_depth": "basic",
-                "max_results": 5
-            },
-            timeout=20
-        )
-        data = resp.json()
+        from baidusearch import baidusearch
+        data = baidusearch.search(query, max_results=5)
         results = []
-        for item in data.get("results", []):
-            content = item.get("content", "")
-            if len(content) > 10:
-                results.append(f"- {item.get('title', '')}: {content}")
+        for item in data:
+            title = item.get("title", "")
+            abstract = item.get("abstract", "")
+            if title and len(abstract) > 5:
+                results.append(f"- {title}: {abstract}")
         return "\n".join(results) if results else "搜索未返回有效结果。"
     except Exception as e:
         return f"搜索失败：{str(e)}"
 
 
 def _search_with_tavily(system_prompt, user_query, search_mode="pre_match", model=None):
-    """直接 Tavily 搜索 + DeepSeek 汇总，不依赖 tool-calling"""
-    if not TAVILY_API_KEY:
-        return ""
-
-    # extract clean match name for search keywords
+    """百度搜索 + DeepSeek 汇总"""
+    # extract clean match name
     search_target = user_query
     for sep in [r'\s+vs\s+', r'\s+v\s+', r'\s+对阵\s+', r'\s+对\s+']:
         parts = re.split(sep, user_query, flags=re.IGNORECASE)
@@ -1080,21 +1066,20 @@ def _search_with_tavily(system_prompt, user_query, search_mode="pre_match", mode
 
     if search_mode == "pre_match":
         search_rounds = [
-            f'"{search_target}" predicted lineup injuries team news 2026 World Cup',
-            f"{search_target} coach pre-match press conference tactical approach 2026",
-            f'"{search_target}" odds betting preview head-to-head history',
-            f'{search_target} 预计首发 教练赛前发言 战术布置 伤病 2026世界杯',
+            f"{search_target} 2026世界杯 阵容 伤病 首发预测",
+            f"{search_target} 赔率 裁判 赛前新闻 教练赛前发言",
+            f"{search_target} 历史交锋 出线形势 战术分析 关键球员",
         ]
     else:
         search_rounds = [
-            f'"{search_target}" final score result goalscorers match report',
-            f"{search_target} 最终比分 进球者 赛后技术统计 射门 控球",
-            f'"{search_target}" coach reaction referee decisions key events 2026',
+            f"{search_target} 最终比分 进球者 进球时间 2026",
+            f"{search_target} 赛后技术统计 射门 控球率 角球",
+            f"{search_target} 赛后报告 比赛回顾 关键事件 红黄牌",
         ]
 
     all_results = ""
     with ThreadPoolExecutor(max_workers=len(search_rounds)) as ex:
-        futures = [ex.submit(_cached_tavily, q) for q in search_rounds]
+        futures = [ex.submit(_cached_baidu, q) for q in search_rounds]
         for f in as_completed(futures):
             r = f.result()
             if r and "搜索失败" not in r:
@@ -1219,7 +1204,7 @@ def calibrate_record(record, max_attempts=3):
         ]
         raw_search = ""
         for q in search_rounds:
-            r = _cached_tavily(q)
+            r = _cached_baidu(q)
             if r and "搜索未返回有效结果" not in r and "搜索失败" not in r:
                 raw_search += r + "\n"
 
