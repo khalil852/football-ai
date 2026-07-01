@@ -4,7 +4,6 @@ import json
 import os
 import re
 import math
-import time
 import hashlib
 import random
 import string
@@ -1609,69 +1608,64 @@ st.session_state.training_mode = training_mode
 if st.button("⚡ 一键推演", use_container_width=True, type="primary",
               help="自动完成搜索+推演，适合快速查看预测", key="one_click_predict"):
     if match:
-        prog = st.progress(0, text="⏳ 正在生成推演报告，请稍候...")
-        bar_running = True
-        def fill_bar():
-            pct = 0.0
-            while bar_running and pct < 0.95:
-                time.sleep(2)
-                pct = min(pct + 0.08, 0.95)
-                prog.progress(pct, text="⏳ 正在生成推演报告，请稍候...")
-        import threading
-        t = threading.Thread(target=fill_bar, daemon=True)
-        t.start()
-        try:
-            sq = f"请为 {match} 搜集赛前关键信息，并严格按照模板格式输出。" if not training_mode else \
-                 f"请为 {match} 搜集比赛的赛前关键信息（首发阵容、伤病、赔率、历史交锋、教练发言、出线形势），并严格按照模板格式输出。请注意：这是一场已经结束的比赛，但请只搜集「赛前」信息，不要包含最终比分或赛后数据。"
-            search_result = call_deepseek(system_prompt_search, sq, enable_search=True, search_mode="pre_match", model=MODEL_SEARCH)
-            if not search_result:
-                bar_running = False; prog.empty(); st.warning("搜索未返回结果。"); st.stop()
-            st.session_state.search_report = search_result
-            st.session_state.current_match = match
-            et = extract_match_time(search_result)
-            if et: st.session_state.current_match_time = et
-            elif training_mode: st.session_state.current_match_time = "2000-01-01 00:00"
-        except Exception as e:
-            bar_running = False; prog.empty(); st.error(f"搜索出错: {str(e)[:80]}"); st.stop()
-
-        try:
-            params = _extract_params(search_result, laws_data.get("laws",[]))
-            def ok(key, d=1.0):
-                try: v = float(params.get(key,d))
-                except: v = d
-                return max(0.7,min(1.3,v)) if key not in ("lam_h_initial","lam_a_initial","odds_h","odds_d","odds_a") else v
-            merged = params.get("merged_modifiers",{})
-            mod = LambdaModifiers.from_merged(merged, home_adv=params.get("home_adv",False)) if merged else LambdaModifiers(attack=ok("attack"),defense=ok("defense"),tactical=ok("tactical"),coach_intent=ok("coach_intent"),scenario=ok("scenario"),home_adv=1.08 if params.get("home_adv",False) else 1.0)
-            odds = None
+        with st.spinner("⏳ 正在搜索并汇总数据..."):
             try:
-                oh,od,oa = float(params.get("odds_h",0)),float(params.get("odds_d",0)),float(params.get("odds_a",0))
-                if oh and od and oa: odds=(oh,od,oa)
-            except: pass
-            h0 = max(0.8,min(4.0,ok("lam_h_initial",1.5)))
-            a0 = max(0.8,min(4.0,ok("lam_a_initial",1.2)))
-            pred = predict_match(home=params.get("home_team",""),away=params.get("away_team",""),lam_h0=h0,lam_a0=a0,mod=mod,odds=odds,lam_c=ok("lam_c",0.01),phi=ok("phi",0.20),is_knockout=is_knockout)
-            st.session_state.math_prediction=pred; pred.confidence*=mod.confidence
-            mi = {k:getattr(mod,k) for k in ("attack","defense","tactical","coach_intent","scenario","home_adv","confidence")}; mi.update(mod._extra)
-            ef = {}
-            if is_knockout and pred.locked_h==pred.locked_a:
-                ef["比赛类型"]="淘汰赛"; ef["90分钟"]=f"{pred.locked_h}-{pred.locked_a}"; ef["加时赛比分"]=f"{pred.et_score_h}-{pred.et_score_a}"
-                if pred.et_score_h==pred.et_score_a: ef["点球比分"]=f"{pred.pen_score_h}-{pred.pen_score_a}"
-                ef["主队晋级概率"]=f"{pred.home_advance*100:.1f}%"; ef["客队晋级概率"]=f"{pred.away_advance*100:.1f}%"
-            mj=json.dumps({"锁定比分":f"{pred.locked_h}-{pred.locked_a}","主队":pred.home_team,"客队":pred.away_team,"主队λ":round(pred.lam_h,2),"客队λ":round(pred.lam_a,2),"期望进球":f"{pred.exp_h:.2f}-{pred.exp_a:.2f}","主胜":f"{pred.home_win*100:.1f}%","平局":f"{pred.draw*100:.1f}%","客胜":f"{pred.away_win*100:.1f}%","比分概率":[f"{h}-{a}({p*100:.1f}%)" for (h,a),p in pred.top_scores[:5]],"模型置信度":f"{pred.confidence*100:.0f}%","定律修正因子":mi,**ef},ensure_ascii=False)
-            aq = f"赛前数据报告:\n{search_result[:8000]}\n\n数学模型计算结果:\n{mj}\n\n**【教练意图评级要求】**\n从赛前数据报告中的「教练发言」和「首发阵容」揣摩双方教练的进攻意图，按 L1-L5 评级。必须写明评级依据。\n\n**【最高优先级】报告中必须使用以上「锁定比分」字段的值作为最终推演比分。**\n"
-            result = _deepseek_chat(_ANALYSIS_FROM_JSON_PROMPT, aq, model=MODEL_ANALYSIS)
-            if not result:
-                bar_running = False; prog.progress(0.85, text="🔄 备用模型重试...")
-                result = _deepseek_chat(_ANALYSIS_FROM_JSON_PROMPT, aq, model=MODEL_SEARCH)
-            if result:
-                bar_running = False; st.session_state.analysis_report = result
-                st.session_state.math_json = mj; save_record(match, search_result, result)
-                prog.progress(1.0, text="✅ 推演完成！")
-                time.sleep(0.5); prog.empty(); st.rerun()
-            else:
-                bar_running = False; prog.empty(); st.error("推演报告生成失败，请重试。")
-        except Exception as e:
-            bar_running = False; prog.empty(); st.error(f"推演出错: {str(e)[:80]}")
+                sq = f"请为 {match} 搜集赛前关键信息，并严格按照模板格式输出。" if not training_mode else \
+                     f"请为 {match} 搜集比赛的赛前关键信息（首发阵容、伤病、赔率、历史交锋、教练发言、出线形势），并严格按照模板格式输出。请注意：这是一场已经结束的比赛，但请只搜集「赛前」信息，不要包含最终比分或赛后数据。"
+                search_result = call_deepseek(system_prompt_search, sq, enable_search=True, search_mode="pre_match", model=MODEL_SEARCH)
+                if not search_result:
+                    st.warning("搜索未返回结果。"); st.stop()
+                st.session_state.search_report = search_result
+                st.session_state.current_match = match
+                et = extract_match_time(search_result)
+                if et: st.session_state.current_match_time = et
+                elif training_mode: st.session_state.current_match_time = "2000-01-01 00:00"
+            except Exception as e:
+                st.error(f"搜索出错: {str(e)[:80]}"); st.stop()
+
+        with st.spinner("🧮 正在提取参数并运行数学引擎..."):
+            try:
+                params = _extract_params(search_result, laws_data.get("laws",[]))
+                def ok(key, d=1.0):
+                    try: v = float(params.get(key,d))
+                    except: v = d
+                    return max(0.7,min(1.3,v)) if key not in ("lam_h_initial","lam_a_initial","odds_h","odds_d","odds_a") else v
+                merged = params.get("merged_modifiers",{})
+                mod = LambdaModifiers.from_merged(merged, home_adv=params.get("home_adv",False)) if merged else LambdaModifiers(attack=ok("attack"),defense=ok("defense"),tactical=ok("tactical"),coach_intent=ok("coach_intent"),scenario=ok("scenario"),home_adv=1.08 if params.get("home_adv",False) else 1.0)
+                odds = None
+                try:
+                    oh,od,oa = float(params.get("odds_h",0)),float(params.get("odds_d",0)),float(params.get("odds_a",0))
+                    if oh and od and oa: odds=(oh,od,oa)
+                except: pass
+                h0 = max(0.8,min(4.0,ok("lam_h_initial",1.5)))
+                a0 = max(0.8,min(4.0,ok("lam_a_initial",1.2)))
+                pred = predict_match(home=params.get("home_team",""),away=params.get("away_team",""),lam_h0=h0,lam_a0=a0,mod=mod,odds=odds,lam_c=ok("lam_c",0.01),phi=ok("phi",0.20),is_knockout=is_knockout)
+                st.session_state.math_prediction=pred; pred.confidence*=mod.confidence
+                mi = {k:getattr(mod,k) for k in ("attack","defense","tactical","coach_intent","scenario","home_adv","confidence")}; mi.update(mod._extra)
+                ef = {}
+                if is_knockout and pred.locked_h==pred.locked_a:
+                    ef["比赛类型"]="淘汰赛"; ef["90分钟"]=f"{pred.locked_h}-{pred.locked_a}"; ef["加时赛比分"]=f"{pred.et_score_h}-{pred.et_score_a}"
+                    if pred.et_score_h==pred.et_score_a: ef["点球比分"]=f"{pred.pen_score_h}-{pred.pen_score_a}"
+                    ef["主队晋级概率"]=f"{pred.home_advance*100:.1f}%"; ef["客队晋级概率"]=f"{pred.away_advance*100:.1f}%"
+                mj=json.dumps({"锁定比分":f"{pred.locked_h}-{pred.locked_a}","主队":pred.home_team,"客队":pred.away_team,"主队λ":round(pred.lam_h,2),"客队λ":round(pred.lam_a,2),"期望进球":f"{pred.exp_h:.2f}-{pred.exp_a:.2f}","主胜":f"{pred.home_win*100:.1f}%","平局":f"{pred.draw*100:.1f}%","客胜":f"{pred.away_win*100:.1f}%","比分概率":[f"{h}-{a}({p*100:.1f}%)" for (h,a),p in pred.top_scores[:5]],"模型置信度":f"{pred.confidence*100:.0f}%","定律修正因子":mi,**ef},ensure_ascii=False)
+                aq = f"赛前数据报告:\n{search_result[:8000]}\n\n数学模型计算结果:\n{mj}\n\n**【教练意图评级要求】**\n从赛前数据报告中的「教练发言」和「首发阵容」揣摩双方教练的进攻意图，按 L1-L5 评级。必须写明评级依据。\n\n**【最高优先级】报告中必须使用以上「锁定比分」字段的值作为最终推演比分。**\n"
+            except Exception as e:
+                st.error(f"推演出错: {str(e)[:80]}"); st.stop()
+
+        with st.spinner("📝 正在生成推演报告..."):
+            try:
+                result = _deepseek_chat(_ANALYSIS_FROM_JSON_PROMPT, aq, model=MODEL_ANALYSIS)
+                if not result:
+                    st.warning("备用模型重试...")
+                    result = _deepseek_chat(_ANALYSIS_FROM_JSON_PROMPT, aq, model=MODEL_SEARCH)
+                if result:
+                    st.session_state.analysis_report = result
+                    st.session_state.math_json = mj; save_record(match, search_result, result)
+                    st.success("✅ 推演完成！"); st.rerun()
+                else:
+                    st.error("推演报告生成失败，请重试。")
+            except Exception as e:
+                st.error(f"推演出错: {str(e)[:80]}")
     else:
         st.warning("请先输入比赛名称")
 
