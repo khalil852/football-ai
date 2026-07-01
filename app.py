@@ -877,17 +877,30 @@ def _run_law_engine(search_report: str, laws: list) -> dict:
                  "coach_intent": 1.0, "scenario": 1.0, "confidence": 1.0}
     triggered = []
 
-    # Tier 1: 查教练库
+    # Tier 1: 查教练库（队名中→英映射）
+    _TEAM_EN = {
+        "挪威":"Norway","法国":"France","巴西":"Brazil","阿根廷":"Argentina",
+        "英格兰":"England","德国":"Germany","西班牙":"Spain","葡萄牙":"Portugal",
+        "荷兰":"Netherlands","比利时":"Belgium","克罗地亚":"Croatia","乌拉圭":"Uruguay",
+        "墨西哥":"Mexico","美国":"USA","加拿大":"Canada","塞内加尔":"Senegal",
+        "日本":"Japan","韩国":"South Korea","澳大利亚":"Australia","伊朗":"Iran",
+        "卡塔尔":"Qatar","沙特":"Saudi Arabia","加纳":"Ghana","突尼斯":"Tunisia",
+        "埃及":"Egypt","瑞典":"Sweden","瑞士":"Switzerland","丹麦":"Denmark",
+        "土耳其":"Turkey","捷克":"Czechia","苏格兰":"Scotland","科特迪瓦":"Ivory Coast",
+        "南非":"South Africa","海地":"Haiti","巴拿马":"Panama","新西兰":"New Zealand",
+        "哥伦比亚":"Colombia","厄瓜多尔":"Ecuador","巴拉圭":"Paraguay","奥地利":"Austria",
+        "摩洛哥":"Morocco","阿尔及利亚":"Algeria","波黑":"Bosnia-Herzegovina",
+        "刚果":"DR Congo","佛得角":"Cape Verde","乌兹别克":"Uzbekistan",
+        "伊拉克":"Iraq","库拉索":"Curacao","约旦":"Jordan",
+    }
     team1, team2 = _parse_teams(search_report)
-    if team1:
-        coach = _lookup_coach(team1)
+    for team_cn, is_home in [(team1, True), (team2, False)]:
+        if not team_cn: continue
+        team_en = _TEAM_EN.get(team_cn, team_cn)
+        coach = _lookup_coach(team_en)
         if coach:
-            modifiers["coach_intent"] *= float(coach.get("aggression", 1.0))
-            modifiers["confidence"] *= float(coach.get("confidence", 1.0))
-    if team2:
-        coach = _lookup_coach(team2)
-        if coach:
-            # 客队教练影响客队维度较小
+            if is_home:
+                modifiers["coach_intent"] *= float(coach.get("aggression", 1.0))
             modifiers["confidence"] *= float(coach.get("confidence", 1.0))
 
     # Tier 2: 确定性规则引擎
@@ -1661,10 +1674,14 @@ if st.button("⚡ 一键推演", use_container_width=True, type="primary",
             st.session_state.math_prediction=pred; pred.confidence*=mod.confidence
             mi = {k:getattr(mod,k) for k in ("attack","defense","tactical","coach_intent","scenario","home_adv","confidence")}; mi.update(mod._extra)
             ef = {}
-            if is_knockout and pred.locked_h==pred.locked_a:
-                ef["比赛类型"]="淘汰赛"; ef["90分钟"]=f"{pred.locked_h}-{pred.locked_a}"; ef["加时赛比分"]=f"{pred.et_score_h}-{pred.et_score_a}"
-                if pred.et_score_h==pred.et_score_a: ef["点球比分"]=f"{pred.pen_score_h}-{pred.pen_score_a}"
-                ef["主队晋级概率"]=f"{pred.home_advance*100:.1f}%"; ef["客队晋级概率"]=f"{pred.away_advance*100:.1f}%"
+            if is_knockout:
+                # 有加时数据才展示淘汰赛信息（无数据说明 knockout 模式没有实际生效）
+                if pred.extra_time_pct > 0 or pred.et_score_h != 0 or pred.et_score_a != 0:
+                    ef["比赛类型"]="淘汰赛"
+                    ef["90分钟"]=f"{pred.locked_h}-{pred.locked_a}"
+                    ef["加时赛比分"]=f"{pred.et_score_h}-{pred.et_score_a}"
+                    if pred.et_score_h==pred.et_score_a: ef["点球比分"]=f"{pred.pen_score_h}-{pred.pen_score_a}"
+                    ef["主队晋级概率"]=f"{pred.home_advance*100:.1f}%"; ef["客队晋级概率"]=f"{pred.away_advance*100:.1f}%"
             mj=json.dumps({"锁定比分":f"{pred.locked_h}-{pred.locked_a}","主队":pred.home_team,"客队":pred.away_team,"主队λ":round(pred.lam_h,2),"客队λ":round(pred.lam_a,2),"期望进球":f"{pred.exp_h:.2f}-{pred.exp_a:.2f}","主胜":f"{pred.home_win*100:.1f}%","平局":f"{pred.draw*100:.1f}%","客胜":f"{pred.away_win*100:.1f}%","比分概率":[f"{h}-{a}({p*100:.1f}%)" for (h,a),p in pred.top_scores[:5]],"模型置信度":f"{pred.confidence*100:.0f}%","定律修正因子":mi,**ef},ensure_ascii=False)
             aq = f"赛前数据报告:\n{search_result[:8000]}\n\n数学模型计算结果:\n{mj}\n\n**【教练意图评级要求】**\n从赛前数据报告中的「教练发言」和「首发阵容」揣摩双方教练的进攻意图，按 L1-L5 评级。必须写明评级依据。\n\n**【最高优先级】报告中必须使用以上「锁定比分」字段的值作为最终推演比分。**\n"
         except Exception as e:
