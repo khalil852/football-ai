@@ -2032,7 +2032,26 @@ with st.expander("查看/管理所有定律", expanded=False):
     st.info("💡 开关按钮用于控制该定律是否参与赛前推演。关闭后，模型将不会调用该定律。所有修改会自动保存到云端数据库。")
 
     if laws_data["laws"]:
-        for i, law in enumerate(laws_data["laws"]):
+        # 计算评分并排序
+        scored_laws = []
+        for l in laws_data["laws"]:
+            tc = l.get("triggers_count") or 0
+            cc = l.get("correct_count") or 0
+            acc = cc / tc if tc > 0 else 0
+            # 评分 = 准确率 × log₂(使用次数+2)，既保正确率也保样本量
+            score = round(acc * (math.log2(tc + 2) / math.log2(20)), 2) if tc > 0 else 0
+            scored_laws.append((score, l))
+        scored_laws.sort(key=lambda x: x[0], reverse=True)
+
+        for rank_i, (score, law) in enumerate(scored_laws):
+            # S/A/B/C/D 评级
+            if score >= 0.30: grade = "S"
+            elif score >= 0.20: grade = "A"
+            elif score >= 0.10: grade = "B"
+            elif score >= 0.05: grade = "C"
+            else: grade = "D"
+            rank_badge = f"**<span style='font-size:0.8em;background:var(--primary-color);color:white;padding:2px 6px;border-radius:4px;'>{grade}</span>**"
+
             col1, col2, col_delete = st.columns([1, 9, 1])
             with col1:
                 current_status = law.get("status", "active") == "active"
@@ -2051,14 +2070,14 @@ with st.expander("查看/管理所有定律", expanded=False):
                 status_emoji = "🟢" if law.get("status", "active") == "active" else "🔴"
                 # 精简名：取 name 的前半部分（"核心缺阵 ≠ 进攻归零" → "核心缺阵"）
                 short_name = law["name"].split("：")[0].split(":")[0].split("补丁")[0].strip()
-                st.markdown(f"**{status_emoji} {short_name}** {law.get('lambda_effect', '')}")
+                st.markdown(f"{rank_badge} **{status_emoji} {short_name}** {law.get('lambda_effect', '')}", unsafe_allow_html=True)
                 # 显示使用准确率
                 tc = law.get("triggers_count") or 0
                 cc = law.get("correct_count") or 0
                 if tc > 0:
-                    acc = round(cc / tc * 100)
-                    star = "⭐" + ("🌟" if acc >= 70 else "")
-                    st.markdown(f"{star} 使用 {tc} 次 · 准确率 **{acc}%**")
+                    acc_pct = round(cc / tc * 100)
+                    star = "⭐" + ("🌟" if acc_pct >= 70 else "")
+                    st.markdown(f"{star} 使用 {tc} 次 · 准确率 **{acc_pct}%** · 评分 **{score:.2f}**")
                 else:
                     st.markdown(f"· 使用 {tc} 次")
             
