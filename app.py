@@ -517,8 +517,7 @@ def can_calibrate(match_time_str):
 MODEL_SEARCH     = {"model": "deepseek-chat"}
 MODEL_ANALYSIS   = {"model": "deepseek-v4-pro", "reasoning_effort": "max"}
 MODEL_CALIBRATE  = {"model": "deepseek-chat"}
-MODEL_LAW_PARAMS = {"model": "deepseek-v4-pro"}    # _laws_to_modifiers — 多任务推理需 pro 级别
-MODEL_EXTRACT    = {"model": "deepseek-chat"}       # _extract_params 回退 — 简单提取
+MODEL_EXTRACT    = {"model": "deepseek-chat"}       # _extract_params — 简单提取 λ 和赔率
 
 
 def _deepseek_chat(system_prompt, user_content, model=None):
@@ -553,6 +552,84 @@ def _deepseek_chat(system_prompt, user_content, model=None):
         st.error(f"API 错误：{data['error']}")
         return ""
     return data['choices'][0]['message'].get('content', '')
+
+
+# =============================================================================
+# 规则引擎 — 确定性定律执行器（纯 Python，不调 LLM）
+# 从 Supabase 读取结构化的定律卡片，逐条匹配搜索报告，应用修正因子
+# =============================================================================
+
+_RULE_CATEGORIES = {
+    "attack": "attack", "defense": "defense", "tactical": "tactical",
+    "coach_intent": "coach_intent", "scenario": "scenario", "confidence": "confidence",
+}
+
+
+def _load_rules():
+    """从 Supabase 加载当前用户的 active 定律"""
+    try:
+        resp = st.session_state.get("username")
+        if not resp:
+            return []
+        data = supabase.table("laws").select("*").eq("username", st.session_state.username).eq("status", "active").execute()
+        return data.data or []
+    except Exception:
+        return []
+
+
+def _run_rules(search_report: str, rules: list, lam_modifiers: dict) -> dict:
+    """确定性规则引擎：逐条检查关键词，命中则应用修正。
+    rules: [{"category":"attack","trigger_keywords":["伤缺"],"effect_value":0.85,"effect_target":"attack"},...]
+    lam_modifiers: {"attack":1.0,"defense":1.0,"tactical":1.0,"coach_intent":1.0,"scenario":1.0,"confidence":1.0}
+    返回: {"merged":{...}, "triggered":[...]}
+    """
+    report_lower = (search_report or "").lower()
+    triggered = []
+    merged = dict(lam_modifiers)
+
+    for rule in rules:
+        keywords = rule.get("trigger_keywords") or []
+        if not keywords:
+            continue
+        # 任意一个关键词命中即触发
+        hit = any(kw.lower() in report_lower for kw in keywords if kw)
+        if not hit:
+            continue
+
+        triggerd_name = rule.get("name", "unknown")
+        target = rule.get("effect_target", "attack")
+        etype = rule.get("effect_type", "multiply")
+        evalue = rule.get("effect_value", 1.0)
+
+        # 目标可以是 attack/defense/tactical/coach_intent/scenario/confidence
+        # 也可以是任意自定义键（放入 _extra）
+        if target in _RULE_CATEGORIES:
+            if etype == "multiply":
+                merged[target] *= evalue
+            elif etype == "override":
+                merged[target] = evalue
+        else:
+            # 自定义目标：暂存入 extra
+            if "_extra" not in merged:
+                merged["_extra"] = {}
+            merged["_extra"][target] = evalue
+
+        triggered.append(rule.get("name", rule.get("id", "?")))
+
+    return {"merged": merged, "triggered": triggered}
+
+
+def _lookup_coach(team_name: str) -> dict:
+    """查教练库，返回教练数据 dict。表不存在时静默返回空。"""
+    if not team_name:
+        return {}
+    try:
+        data = supabase.table("coaches").select("*").eq("team", team_name).execute()
+        if data.data:
+            return data.data[0]
+    except Exception:
+        pass  # 表不存在时静默跳过
+    return {}
 
 
 # =============================================================================
@@ -791,114 +868,46 @@ def calibrate_math(pred: MatchPrediction, actual_h: int, actual_a: int,
                              score_match=score_match, result_match=result_match,
                              goal_deviation=round(deviation, 2))
 
-# ---- 精简版 prompt：定律已有 modifier_map 时使用，AI 只需匹配 trigger ----
-_LAW_WEIGHT_MAP_PROMPT = (
-    "你是一个足球量化分析师。逐条检查定律的 trigger 是否匹配本场比赛。\n"
-    "如果匹配，直接使用定律自带的 modifier_map 值，不要修改。\n"
-    "从赛前报告中提取两队近期的场均进球数作为 λ 初始值。\n"
-    "λ 必须在 0.8-3.5 范围内（世界杯球队场均进 0.5-3.5 球）。\n"
-    "输出 JSON: {\"merged_modifiers\": {\"attack\": 0.85, ...}, "
-    "\"lam_h_initial\": 1.5, \"lam_a_initial\": 1.3, "
-    "\"phi\": 0.20, \"lam_c\": 0.01, \"home_adv\": true, "
-    "\"odds_h\": null, \"odds_d\": null, \"odds_a\": null, "
-    "\"triggered\": [\"匹配的定律名1\"], \"summary\": \"一句话\"}\n"
-    "仅输出 JSON，不要解释。"
-)
+def _run_law_engine(search_report: str, laws: list) -> dict:
+    """运行规则引擎: 确定性关键词匹配 + 教练库查表。
+    返回 {"merged_modifiers": {...}, "triggered": [...], "lam_h_initial": ..., "lam_a_initial": ...}
+    """
+    # 默认修正因子
+    modifiers = {"attack": 1.0, "defense": 1.0, "tactical": 1.0,
+                 "coach_intent": 1.0, "scenario": 1.0, "confidence": 1.0}
+    triggered = []
 
-# ---- 回退版 prompt：定律没有 modifier_map，AI 需自行推断因子 ----
-_LAW_WEIGHT_PROMPT_FALLBACK = (
-    "你是一个足球量化分析师。逐条检查定律是否匹配本场比赛。\n"
-    "对匹配的定律，根据 lambda_effect 推断乘性修正因子。\n"
-    "加法转乘性：factor = (λ + delta) / λ，假设 λ≈1.5。\n"
-    "权重参考：0.70-0.85 严重削弱 | 0.86-0.95 轻微削弱 | 1.0 无影响 | 1.05-1.15 轻微增强。\n"
-    "λ 初始值必须在 0.8-3.5（世界杯场均 0.5-3.5 球）。\n"
-    "输出 JSON: {\"merged_modifiers\": {\"attack\": 0.85, ...}, "
-    "\"lam_h_initial\": 1.5, \"lam_a_initial\": 1.3, "
-    "\"phi\": 0.20, \"lam_c\": 0.01, \"home_adv\": true, "
-    "\"odds_h\": null, \"odds_d\": null, \"odds_a\": null}\n"
-    "仅输出 JSON，不要解释。"
-)
+    # Tier 1: 查教练库
+    team1, team2 = _parse_teams(search_report)
+    if team1:
+        coach = _lookup_coach(team1)
+        if coach:
+            modifiers["coach_intent"] *= float(coach.get("aggression", 1.0))
+            modifiers["confidence"] *= float(coach.get("confidence", 1.0))
+    if team2:
+        coach = _lookup_coach(team2)
+        if coach:
+            # 客队教练影响客队维度较小
+            modifiers["confidence"] *= float(coach.get("confidence", 1.0))
 
+    # Tier 2: 确定性规则引擎
+    active_rules = [l for l in laws if l.get("status", "active") == "active" and l.get("trigger_keywords")]
+    if active_rules and search_report:
+        result = _run_rules(search_report, active_rules, modifiers)
+        modifiers = result["merged"]
+        triggered = result["triggered"]
 
-def _laws_to_modifiers(search_report: str, laws: list) -> dict:
-    """将定律库应用到具体比赛，输出精确乘性修正因子。
-    若 LLM 调用失败，回退为基础提取模式。"""
-    if not search_report:
-        return {}
+    # 用户激进程度
+    aggro = st.session_state.get("law_aggressiveness", 1.0)
+    if aggro != 1.0:
+        for k in ("attack", "defense", "tactical", "coach_intent", "scenario", "confidence"):
+            modifiers[k] = 1.0 + (modifiers[k] - 1.0) * aggro
 
-    active_laws = [l for l in laws if l.get("status", "active") == "active"]
-    if not active_laws:
-        active_laws = laws
+    if triggered:
+        st.info(f"📋 触发 {len(triggered)} 条定律: {', '.join(triggered[:5])}")
+    st.session_state["last_triggered_laws"] = triggered
 
-    # 检查是否所有定律都有 modifier_map
-    all_have_map = all(l.get("modifier_map") for l in active_laws)
-
-    # 构建精简 law 摘要（有 modifier_map 时只传 key 字段）
-    law_summaries = []
-    for l in active_laws:
-        entry = {
-            "name": l.get("name", ""),
-            "trigger": l.get("trigger", ""),
-            "content": l.get("content", ""),
-        }
-        if l.get("modifier_map"):
-            entry["modifier_map"] = l["modifier_map"]
-        else:
-            entry["lambda_effect"] = l.get("lambda_effect", "")
-        law_summaries.append(entry)
-
-    system_msg = _LAW_WEIGHT_MAP_PROMPT if all_have_map else _LAW_WEIGHT_PROMPT_FALLBACK
-    laws_json = json.dumps(law_summaries, ensure_ascii=False, indent=2)
-
-    try:
-        payload = {"max_tokens": 2000 if all_have_map else 3000, "temperature": 0.0}
-        payload.update(MODEL_LAW_PARAMS)
-        payload.update({
-            "messages": [
-                {"role": "system", "content": system_msg},
-                {"role": "user",
-                 "content": f"## 赛前数据报告\n{search_report[:8000]}\n\n## 定律库\n{laws_json}"}
-            ],
-        })
-        resp = requests.post(
-            url=URL,
-            headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
-            json=payload,
-            timeout=45
-        )
-        data = resp.json()
-        if "error" in data:
-            return {}
-        content = data["choices"][0]["message"].get("content", "")
-        m = re.search(r'\{[\s\S]*\}', content)
-        if m:
-            result = json.loads(m.group())
-            # 用户设定的激进程度：拉向或推离 1.0
-            aggro = st.session_state.get("law_aggressiveness", 1.0)
-            merged = result.get("merged_modifiers", {})
-            if merged and aggro != 1.0:
-                adj = {}
-                for k, v in merged.items():
-                    try:
-                        v = float(v)
-                        adj[k] = round(1.0 + (v - 1.0) * aggro, 3)
-                    except Exception:
-                        adj[k] = v
-                result["merged_modifiers"] = adj
-            # 展示触发的定律
-            triggered = result.get("triggered", [])
-            if not triggered:
-                law_effects = result.get("law_effects", [])
-                triggered = [e.get("law_name", "") for e in law_effects if e.get("applies")]
-            if triggered:
-                aggro_label = f" [{'保守' if aggro < 1.0 else '激进'} ×{aggro:.1f}]" if aggro != 1.0 else ""
-                st.info(f"📋 触发 {len(triggered)}/{len(active_laws)} 条定律{aggro_label}: {', '.join(triggered[:5])}")
-            # 保存触发的定律名到 session_state，供校准阶段更新准确率
-            st.session_state["last_triggered_laws"] = triggered
-            return result
-    except Exception:
-        pass
-    return {}
+    return {"merged_modifiers": modifiers, "triggered": triggered}
 
 
 # ---- 回退模式 prompt（定律库加载失败时使用）----
@@ -910,37 +919,38 @@ _PARAM_EXTRACT_PROMPT = (
 )
 
 def _extract_params(search_report: str, laws: list = None) -> dict:
-    """从搜索报告提取结构化参数 — 优先使用定律驱动模式"""
-    if laws and len(laws) > 0:
-        result = _laws_to_modifiers(search_report, laws)
-        if result and "home_team" in result:
-            return result
-    # 回退：纯 AI 猜测
+    """提取参数：规则引擎（确定性）+ LLM（λ/赔率）"""
+    params = {}
+
+    # Tier 1: 规则引擎 + 教练库（零 LLM 成本）
+    rule_result = _run_law_engine(search_report, laws or [])
+    rule_merged = rule_result.get("merged_modifiers", {})
+    params["merged_modifiers"] = rule_merged
+    params["triggered"] = rule_result.get("triggered", [])
+
+    # Tier 2: LLM 提取 λ 和赔率（deepseek-chat，便宜）
     try:
-        payload = {"max_tokens": 800, "temperature": 0.0}
-        payload.update(MODEL_EXTRACT)
-        payload.update({
-            "messages": [
-                {"role": "system", "content": _PARAM_EXTRACT_PROMPT},
-                {"role": "user", "content": search_report[:8000]}
-            ],
-        })
-        resp = requests.post(
-            url=URL,
-            headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
-            json=payload,
-            timeout=30
+        prompt = (
+            "从赛前数据报告中提取两队名和λ初始值。仅输出JSON:\n"
+            '{"home_team":"","away_team":"","lam_h_initial":1.5,"lam_a_initial":1.2,'
+            '"odds_h":null,"odds_d":null,"odds_a":null}\n'
+            "λ必须在0.8-3.5之间。报告：\n" + search_report[:6000]
         )
+        payload = {"max_tokens": 300, "temperature": 0.0}
+        payload.update(MODEL_EXTRACT)
+        payload.update({"messages": [{"role": "user", "content": prompt}]})
+        resp = requests.post(url=URL, headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}, json=payload, timeout=20)
         data = resp.json()
-        if "error" in data:
-            return {}
-        content = data["choices"][0]["message"].get("content", "")
-        m = re.search(r'\{[\s\S]*\}', content)
-        if m:
-            return json.loads(m.group())
+        if "error" not in data:
+            content = data["choices"][0]["message"].get("content", "")
+            m = re.search(r'\{[\s\S]*\}', content)
+            if m:
+                llm = json.loads(m.group())
+                params.update(llm)
     except Exception:
         pass
-    return {}
+
+    return params
 
 
 # ---- 推演报告 prompt（教练意图 L1-L5 必须是第一步）----
