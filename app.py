@@ -128,6 +128,97 @@ def logout():
 # ============ 页面配置 ============
 st.set_page_config(page_title="全维推演工厂", page_icon="⚽", layout="wide")
 
+st.markdown("""
+<style>
+    /* 全局样式 */
+    .stApp { background: #0e1117; }
+    .main > .block-container { max-width: 900px; padding-top: 1rem; }
+
+    /* 卡片容器 */
+    div[data-testid="stExpander"] {
+        background: linear-gradient(135deg, #1a1d27, #22263a);
+        border: 1px solid #2d3148;
+        border-radius: 12px;
+        margin-bottom: 0.8rem;
+        padding: 0.2rem 0.5rem;
+    }
+    div[data-testid="stExpander"] summary {
+        font-weight: 600;
+        padding: 0.4rem 0;
+    }
+
+    /* 比分卡片 */
+    .score-card {
+        background: linear-gradient(135deg, #1e2235, #252a42);
+        border: 1px solid #323a5a;
+        border-radius: 16px;
+        padding: 1.5rem 1rem;
+        margin-bottom: 1rem;
+        text-align: center;
+    }
+    .score-card .teams { font-size: 1.1rem; font-weight: 500; margin-bottom: 0.5rem; color: #c8d0e0; }
+    .score-card .score { font-size: 3rem; font-weight: 700; letter-spacing: 4px; color: #ffffff; }
+    .score-card .probs { font-size: 0.9rem; margin-top: 0.5rem; color: #8892a8; }
+
+    /* 按钮 */
+    .stButton button {
+        border-radius: 10px !important;
+        font-weight: 600 !important;
+        transition: all 0.2s !important;
+    }
+    .stButton button[kind="primary"] {
+        background: linear-gradient(135deg, #2a6ef5, #1a5adf) !important;
+        border: none !important;
+        font-size: 1.05rem !important;
+        padding: 0.5rem 1rem !important;
+    }
+    .stButton button[kind="primary"]:hover {
+        background: linear-gradient(135deg, #3a7eff, #2a6af0) !important;
+        transform: translateY(-1px);
+    }
+
+    /* 输入框 */
+    .stTextInput input {
+        border-radius: 10px !important;
+        border: 1px solid #2d3148 !important;
+        background: #1a1d27 !important;
+        color: #e0e4f0 !important;
+        font-size: 1rem !important;
+    }
+    .stTextInput input:focus {
+        border-color: #3a6ef5 !important;
+        box-shadow: 0 0 0 2px rgba(42, 110, 245, 0.3) !important;
+    }
+
+    /* 侧边栏 */
+    section[data-testid="stSidebar"] { background: #121520; border-right: 1px solid #1e2235; }
+    section[data-testid="stSidebar"] .stMarkdown { color: #c0c8d8; }
+
+    /* 下拉和滑块 */
+    .stSelectbox div[data-baseweb="select"] { border-radius: 10px !important; }
+    .stSlider div[data-testid="stThumbValue"] { background: #2a6ef5 !important; }
+
+    /* 指标卡片 */
+    div[data-testid="stMetric"] {
+        background: #1a1d27;
+        border: 1px solid #2d3148;
+        border-radius: 12px;
+        padding: 1rem;
+    }
+
+    /* 分隔线 */
+    hr { border-color: #2d3148 !important; margin: 1.5rem 0 !important; }
+
+    /* spinner 文字 */
+    .stSpinner > div { color: #8892a8 !important; }
+
+    /* 定律卡牌评级 */
+    .law-grade { font-size: 0.8em; background: #2a6ef5; color: white; padding: 2px 8px; border-radius: 4px; font-weight: 700; }
+    .law-grade-s { background: #ff6b35; }
+    .law-grade-d { background: #555a6a; }
+</style>
+""", unsafe_allow_html=True)
+
 # ============ 登录/注册界面 ============
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
@@ -1686,10 +1777,10 @@ if st.session_state.get("math_json"):
     aw = mj.get("客胜", "?")
     conf = mj.get("模型置信度", "?")
     st.markdown(f"""
-    <div style="text-align:center; padding:1.5em; background:var(--secondary-background-color); border-radius:12px; margin-bottom:1em;">
-        <div style="font-size:1.1em; font-weight:500; margin-bottom:8px;">{home} vs {away}</div>
-        <div style="font-size:3em; font-weight:700; letter-spacing:4px;">{score}</div>
-        <div style="font-size:0.9em; margin-top:8px; color:gray;">{hw} | {dr} | {aw} &nbsp; 置信度 {conf}</div>
+    <div class="score-card">
+        <div class="teams">{home} vs {away}</div>
+        <div class="score">{score}</div>
+        <div class="probs">{hw} | {dr} | {aw} &nbsp; 置信度 {conf}</div>
     </div>
     """, unsafe_allow_html=True)
     if mj.get("主队晋级概率"):
@@ -1701,7 +1792,7 @@ if st.session_state.get("math_json"):
         st.markdown(f"🏆 主队 {mj.get('主队晋级概率','')} / 客队 {mj.get('客队晋级概率','')}{extra_line}")
 
 if st.session_state.search_report:
-    with st.expander("📡 信息雷达：赛前数据报告", expanded=True):
+    with st.expander("📡 信息雷达：赛前数据报告", expanded=False):
         st.markdown(st.session_state.search_report)
 
 if st.session_state.analysis_report:
@@ -1819,7 +1910,8 @@ with st.expander("查看/管理所有定律", expanded=False):
             elif score >= 0.10: grade = "B"
             elif score >= 0.05: grade = "C"
             else: grade = "D"
-            rank_badge = f"**<span style='font-size:0.8em;background:var(--primary-color);color:white;padding:2px 6px;border-radius:4px;'>{grade}</span>**"
+            extra_class = "law-grade-s" if grade == "S" else "law-grade-d" if grade == "D" else ""
+            rank_badge = f"**<span class='law-grade {extra_class}'>{grade}</span>**"
 
             col1, col2, col_delete = st.columns([1, 9, 1])
             with col1:
