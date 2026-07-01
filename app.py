@@ -1993,10 +1993,7 @@ if new_drafts or modified_drafts:
         st.markdown("#### 新定律草案")
         for i, law in enumerate(new_drafts):
             with st.container():
-                st.markdown(f"**📌 {law.get('name', '新定律')}** (来自: {law.get('source_match', '未知')})")
-                st.markdown(f"· {law.get('content', '')}")
-                st.markdown(f"· 触发条件：{law.get('trigger', '')}")
-                st.markdown(f"· λ值修正：{law.get('lambda_effect', '')}")
+                st.markdown(f"**📌 {law.get('name', '新定律')}** — {law.get('lambda_effect', '')}")
                 col_apply, col_ignore = st.columns(2)
                 with col_apply:
                     if st.button(f"✅ 应用", key=f"apply_new_{i}"):
@@ -2016,11 +2013,7 @@ if new_drafts or modified_drafts:
         st.markdown("#### 修改建议")
         for i, mod in enumerate(modified_drafts):
             with st.container():
-                st.markdown(f"**✏️ 修改 ID: {mod.get('id', '未知')}** (来自: {mod.get('source_match', '未知')})")
-                st.markdown(f"· 新名称：{mod.get('name', '')}")
-                st.markdown(f"· 新逻辑：{mod.get('content', '')}")
-                st.markdown(f"· 新触发条件：{mod.get('trigger', '')}")
-                st.markdown(f"· 新λ值修正：{mod.get('lambda_effect', '')}")
+                st.markdown(f"**✏️ {mod.get('name', '修改')}** — {mod.get('lambda_effect', '')}")
                 col_apply, col_ignore = st.columns(2)
                 with col_apply:
                     if st.button(f"✅ 应用", key=f"apply_mod_{i}"):
@@ -2056,17 +2049,18 @@ with st.expander("查看/管理所有定律", expanded=False):
 
             with col2:
                 status_emoji = "🟢" if law.get("status", "active") == "active" else "🔴"
-                st.markdown(f"**{status_emoji} {law['name']}**")
-                st.markdown(f"· {law['content']}")
-                st.markdown(f"· 触发条件：{law.get('trigger_condition', '暂无')}")
-                st.markdown(f"· λ值修正：{law.get('lambda_effect', '暂无')}")
+                # 精简名：取 name 的前半部分（"核心缺阵 ≠ 进攻归零" → "核心缺阵"）
+                short_name = law["name"].split("：")[0].split(":")[0].split("补丁")[0].strip()
+                st.markdown(f"**{status_emoji} {short_name}** {law.get('lambda_effect', '')}")
                 # 显示使用准确率
                 tc = law.get("triggers_count") or 0
                 cc = law.get("correct_count") or 0
                 if tc > 0:
                     acc = round(cc / tc * 100)
-                    bar = "█" * (acc // 10) + "░" * (10 - acc // 10)
-                    st.markdown(f"· 使用 {tc} 次 | 正确 {cc} 次 | 准确率 **{acc}%** {bar}")
+                    star = "⭐" + ("🌟" if acc >= 70 else "")
+                    st.markdown(f"{star} 使用 {tc} 次 · 准确率 **{acc}%**")
+                else:
+                    st.markdown(f"· 使用 {tc} 次")
             
             with col_delete:
                 if st.button("🗑️", key=f"delete_law_{law['id']}", help="删除此定律"):
