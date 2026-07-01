@@ -1096,7 +1096,7 @@ def _search_with_tavily(system_prompt, user_query, search_mode="pre_match", mode
 
     all_results = ""
     with ThreadPoolExecutor(max_workers=len(search_rounds)) as ex:
-        futures = [ex.submit(_cached_baidu, q) for q in search_rounds]
+        futures = [ex.submit(_cached_search, q) for q in search_rounds]
         for f in as_completed(futures):
             r = f.result()
             if r and "搜索失败" not in r:
