@@ -130,44 +130,71 @@ st.set_page_config(page_title="全维推演工厂", page_icon="⚽", layout="wid
 
 st.markdown("""
 <style>
-    /* 全局样式 */
-    .stApp { background: #0e1117; color: #e8ecf4 !important; }
+    :root {
+        --bg-primary: #0d1117;
+        --bg-secondary: #161b22;
+        --bg-card: #1c2333;
+        --bg-hover: #21262d;
+        --border: #2d3148;
+        --border-light: #393d52;
+        --text-primary: #e6edf3;
+        --text-secondary: #8b949e;
+        --text-muted: #6e7681;
+        --accent: #4a8cff;
+        --accent-hover: #6ba0ff;
+        --success: #3fb950;
+        --warning: #d29922;
+        --danger: #f85149;
+    }
+
+    .stApp { background: var(--bg-primary); }
     .main > .block-container { max-width: 900px; padding-top: 1rem; }
-    p, span, div, li, h1, h2, h3, h4, h5 { color: #e8ecf4; }
-    .stMarkdown, .stText { color: #e8ecf4 !important; }
+
+    /* 文字 */
+    body, p, span, div, li, .stMarkdown, .stText, td, th {
+        color: var(--text-primary) !important;
+    }
+    h1, h2, h3, h4, h5, h6 { color: var(--text-primary) !important; font-weight: 600; }
+    .stMarkdown code { color: var(--accent) !important; }
+    small, .caption { color: var(--text-secondary) !important; }
 
     /* 卡片容器 */
     div[data-testid="stExpander"] {
-        background: linear-gradient(135deg, #1a1d27, #22263a);
-        border: 1px solid #2d3148;
+        background: var(--bg-card);
+        border: 1px solid var(--border);
         border-radius: 12px;
         margin-bottom: 0.8rem;
         padding: 0.2rem 0.5rem;
     }
-    div[data-testid="stExpander"] summary {
-        font-weight: 600;
-        padding: 0.4rem 0;
-    }
+    div[data-testid="stExpander"] summary { font-weight: 600; padding: 0.4rem 0; }
 
     /* 比分卡片 */
     .score-card {
-        background: linear-gradient(135deg, #1e2235, #252a42);
-        border: 1px solid #323a5a;
+        background: linear-gradient(135deg, #1c2333, #222940);
+        border: 1px solid var(--border-light);
         border-radius: 16px;
         padding: 1.5rem 1rem;
         margin-bottom: 1rem;
         text-align: center;
     }
-    .score-card .teams { font-size: 1.1rem; font-weight: 500; margin-bottom: 0.5rem; color: #c8d0e0; }
-    .score-card .score { font-size: 3rem; font-weight: 700; letter-spacing: 4px; color: #ffffff; }
-    .score-card .probs { font-size: 0.9rem; margin-top: 0.5rem; color: #8892a8; }
+    .score-card .teams { font-size: 1.1rem; font-weight: 500; color: var(--text-secondary); }
+    .score-card .score { font-size: 3rem; font-weight: 700; letter-spacing: 4px; color: var(--text-primary); }
+    .score-card .probs { font-size: 0.9rem; margin-top: 0.5rem; color: var(--text-muted); }
 
-    /* 按钮 */
+    /* 所有按钮统一暗色 */
     .stButton button {
-        border-radius: 10px !important;
+        border-radius: 8px !important;
         font-weight: 600 !important;
-        transition: all 0.2s !important;
+        border: 1px solid var(--border) !important;
+        background: var(--bg-secondary) !important;
+        color: var(--text-primary) !important;
+        padding: 0.4rem 0.8rem !important;
     }
+    .stButton button:hover {
+        background: var(--bg-hover) !important;
+        border-color: var(--text-muted) !important;
+    }
+    .stButton button:active { transform: scale(0.98); }
     .stButton button[kind="primary"] {
         background: linear-gradient(135deg, #2a6ef5, #1a5adf) !important;
         border: none !important;
@@ -175,49 +202,72 @@ st.markdown("""
         padding: 0.5rem 1rem !important;
     }
     .stButton button[kind="primary"]:hover {
-        background: linear-gradient(135deg, #3a7eff, #2a6af0) !important;
-        transform: translateY(-1px);
+        background: linear-gradient(135deg, #4a8cff, #2a6ef5) !important;
     }
 
     /* 输入框 */
     .stTextInput input {
-        border-radius: 10px !important;
-        border: 1px solid #2d3148 !important;
-        background: #1a1d27 !important;
-        color: #e0e4f0 !important;
-        font-size: 1rem !important;
+        border-radius: 8px !important;
+        border: 1px solid var(--border) !important;
+        background: var(--bg-secondary) !important;
+        color: var(--text-primary) !important;
     }
     .stTextInput input:focus {
-        border-color: #3a6ef5 !important;
-        box-shadow: 0 0 0 2px rgba(42, 110, 245, 0.3) !important;
+        border-color: var(--accent) !important;
+        box-shadow: 0 0 0 2px rgba(74, 140, 255, 0.3) !important;
     }
 
     /* 侧边栏 */
-    section[data-testid="stSidebar"] { background: #121520; border-right: 1px solid #1e2235; }
-    section[data-testid="stSidebar"] .stMarkdown { color: #c0c8d8; }
+    section[data-testid="stSidebar"] {
+        background: #11161e !important;
+        border-right: 1px solid var(--border);
+    }
+    section[data-testid="stSidebar"] .stMarkdown { color: var(--text-secondary) !important; }
 
-    /* 下拉和滑块 */
-    .stSelectbox div[data-baseweb="select"] { border-radius: 10px !important; }
-    .stSlider div[data-testid="stThumbValue"] { background: #2a6ef5 !important; }
+    /* 选择框/下拉/日期 */
+    .stSelectbox div[data-baseweb="select"] > div {
+        background: var(--bg-secondary) !important;
+        border-color: var(--border) !important;
+    }
+    .stSelectbox div[data-baseweb="select"] > div:hover { border-color: var(--text-muted) !important; }
+    .stDateInput input { background: var(--bg-secondary) !important; border-color: var(--border) !important; }
+
+    /* Checkbox 标签 */
+    .stCheckbox label { color: var(--text-primary) !important; }
+
+    /* 滑块 */
+    .stSlider div[data-testid="stThumbValue"] { background: var(--accent) !important; }
 
     /* 指标卡片 */
     div[data-testid="stMetric"] {
-        background: #1a1d27;
-        border: 1px solid #2d3148;
+        background: var(--bg-card);
+        border: 1px solid var(--border);
         border-radius: 12px;
         padding: 1rem;
     }
+    div[data-testid="stMetricValue"] { color: var(--text-primary) !important; font-weight: 700; }
+    div[data-testid="stMetricLabel"] { color: var(--text-secondary) !important; }
 
     /* 分隔线 */
-    hr { border-color: #2d3148 !important; margin: 1.5rem 0 !important; }
+    hr { border-color: var(--border) !important; margin: 1.5rem 0 !important; }
 
-    /* spinner 文字 */
-    .stSpinner > div { color: #8892a8 !important; }
+    /* spinner */
+    .stSpinner > div { color: var(--text-secondary) !important; }
 
-    /* 定律卡牌评级 */
-    .law-grade { font-size: 0.8em; background: #2a6ef5; color: white; padding: 2px 8px; border-radius: 4px; font-weight: 700; }
+    /* 信息/警告/错误框 */
+    .stAlert { background: var(--bg-card) !important; border: 1px solid var(--border) !important; }
+    div[data-baseweb="notification"] { background: var(--bg-card) !important; border: 1px solid var(--border) !important; }
+
+    /* Toast 通知 */
+    div[data-testid="stNotification"] { background: var(--bg-card) !important; border: 1px solid var(--border-light) !important; }
+
+    /* 开关（toggle） */
+    .stToggle label { color: var(--text-primary) !important; }
+
+    /* 定律评级 */
+    .law-grade { font-size: 0.8em; background: var(--accent); color: white; padding: 2px 8px; border-radius: 4px; font-weight: 700; }
     .law-grade-s { background: #ff6b35; }
-    .law-grade-d { background: #555a6a; }
+    .law-grade-d { background: var(--text-muted); }
 </style>
 """, unsafe_allow_html=True)
 
