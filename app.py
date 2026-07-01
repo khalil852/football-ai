@@ -1028,11 +1028,14 @@ def _parse_teams(query):
     return None, None
 
 
-# ============ 百度搜索（国内免费，无需 Key）============
+# ============ 百度搜索（国内免费，无需 Key，Tavily 回退）============
 @st.cache_data(ttl=3600, show_spinner=False)
-def _cached_baidu(query):
-    """缓存百度搜索结果，相同 query 1 小时内不重复搜索"""
-    return _baidu_search(query)
+def _cached_search(query):
+    """缓存搜索结果，相同 query 1 小时内不重复搜索"""
+    result = _baidu_search(query)
+    if "搜索未返回有效结果" in result or "搜索失败" in result:
+        result = _tavily_search(query)
+    return result
 
 
 def _baidu_search(query):
@@ -1041,14 +1044,40 @@ def _baidu_search(query):
         from baidusearch import baidusearch
         data = baidusearch.search(query, max_results=5)
         results = []
+        seen = set()
         for item in data:
-            title = item.get("title", "")
-            abstract = item.get("abstract", "")
-            if title and len(abstract) > 5:
-                results.append(f"- {title}: {abstract}")
-        return "\n".join(results) if results else "搜索未返回有效结果。"
+            title = item.get("title", "").strip()
+            abstract = item.get("abstract", "").strip()
+            if not title or title in seen:
+                continue
+            seen.add(title)
+            text = f"{title}: {abstract}" if abstract and len(abstract) > 5 else title
+            results.append(f"- {text}")
+        return "\n".join(results[:5]) if results else "搜索未返回有效结果。"
     except Exception as e:
         return f"搜索失败：{str(e)}"
+
+
+def _tavily_search(query):
+    """Tavily 搜索回退"""
+    try:
+        tv_key = _secret("default_tavily_key")
+        if not tv_key:
+            return "搜索未返回有效结果。"
+        resp = requests.post(
+            "https://api.tavily.com/search",
+            headers={"Content-Type": "application/json"},
+            json={"api_key": tv_key, "query": query, "search_depth": "basic", "max_results": 5},
+            timeout=15
+        )
+        results = []
+        for item in resp.json().get("results", []):
+            c = item.get("content", "")
+            if len(c) > 10:
+                results.append(f"- {item.get('title', '')}: {c}")
+        return "\n".join(results) if results else "搜索未返回有效结果。"
+    except Exception:
+        return "搜索未返回有效结果。"
 
 
 def _search_with_tavily(system_prompt, user_query, search_mode="pre_match", model=None):
@@ -1204,7 +1233,7 @@ def calibrate_record(record, max_attempts=3):
         ]
         raw_search = ""
         for q in search_rounds:
-            r = _cached_baidu(q)
+            r = _cached_search(q)
             if r and "搜索未返回有效结果" not in r and "搜索失败" not in r:
                 raw_search += r + "\n"
 
