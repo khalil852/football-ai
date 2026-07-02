@@ -1730,21 +1730,25 @@ if st.session_state.get("math_json"):
         except: mj = {}
     else:
         mj = mj_raw
-    score = mj.get("锁定比分", "?-?")
+    # 从 "2-1 (90分钟常规时间)" 中提取纯比分
+    score = mj.get("锁定比分", "?-?").split("(")[0].strip()
     home = mj.get("主队", "?")
     away = mj.get("客队", "?")
     hw = mj.get("主胜", "?")
     dr = mj.get("平局", "?")
     aw = mj.get("客胜", "?")
     conf = mj.get("模型置信度", "?")
-    # 格式化: (法国)1:1(塞内加尔)
-    score_compact = score.replace("-", ":")
-    display_score = f"({home}){score_compact}({away})"
-    et_score = mj.get("加时赛比分", "")
-    pen_score = mj.get("点球比分", "")
-    if pen_score:
-        pen_compact = pen_score.replace("-", ":")
-        display_score += f" 加时/点球 ({home}){pen_compact}({away})"
+    # 格式: (法国)1:1(塞内加尔)
+    s = score.replace("-", ":")
+    et = mj.get("加时赛比分", "")
+    pen = mj.get("点球比分", "")
+    if pen:
+        # (法国)1(3):(4)1(塞内加尔)
+        s = score.split("-")
+        p = pen.split("-")
+        display_score = f"({home}){s[0]}({p[0]}):({p[1]}){s[1]}({away})" if len(s)==2 and len(p)==2 else f"({home}){score.replace('-',':')}({away})"
+    else:
+        display_score = f"({home}){s}({away})"
     st.markdown(f"""
     <div class="score-card">
         <div class="score">{display_score}</div>
