@@ -868,16 +868,13 @@ def calibrate_math(pred: MatchPrediction, actual_h: int, actual_a: int,
                              score_match=score_match, result_match=result_match,
                              goal_deviation=round(deviation, 2))
 
-def _run_law_engine(search_report: str, laws: list) -> dict:
-    """运行规则引擎: 确定性关键词匹配 + 教练库查表。
-    返回 {"merged_modifiers": {...}, "triggered": [...], "lam_h_initial": ..., "lam_a_initial": ...}
-    """
-    # 默认修正因子
+def _run_law_engine(search_report: str, laws: list, match_query: str = "") -> dict:
+    """运行规则引擎: 确定性关键词匹配 + 教练库查表。"""
     modifiers = {"attack": 1.0, "defense": 1.0, "tactical": 1.0,
                  "coach_intent": 1.0, "scenario": 1.0, "confidence": 1.0}
     triggered = []
 
-    # Tier 1: 查教练库（队名中→英映射）
+    # Tier 1: 查教练库（队名中→英映射，从用户输入的 match_query 取队名）
     _TEAM_EN = {
         "挪威":"Norway","法国":"France","巴西":"Brazil","阿根廷":"Argentina",
         "英格兰":"England","德国":"Germany","西班牙":"Spain","葡萄牙":"Portugal",
@@ -893,7 +890,10 @@ def _run_law_engine(search_report: str, laws: list) -> dict:
         "刚果":"DR Congo","佛得角":"Cape Verde","乌兹别克":"Uzbekistan",
         "伊拉克":"Iraq","库拉索":"Curacao","约旦":"Jordan",
     }
-    team1, team2 = _parse_teams(search_report)
+    # 优先用 match_query 的 vs 格式提取队名，回退到搜索报告
+    team1, team2 = _parse_teams(match_query) if match_query else (None, None)
+    if not team1:
+        team1, team2 = _parse_teams(search_report)
     for team_cn, is_home in [(team1, True), (team2, False)]:
         if not team_cn: continue
         team_en = _TEAM_EN.get(team_cn, team_cn)
@@ -936,7 +936,8 @@ def _extract_params(search_report: str, laws: list = None) -> dict:
     params = {}
 
     # Tier 1: 规则引擎 + 教练库（零 LLM 成本）
-    rule_result = _run_law_engine(search_report, laws or [])
+    rule_result = _run_law_engine(search_report, laws or [],
+                                  st.session_state.get("current_match", ""))
     rule_merged = rule_result.get("merged_modifiers", {})
     params["merged_modifiers"] = rule_merged
     params["triggered"] = rule_result.get("triggered", [])
