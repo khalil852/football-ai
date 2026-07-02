@@ -1276,41 +1276,39 @@ def calibrate_record(record, max_attempts=3):
         break
 
     # ---- 第二步：从赛后数据提取实际比分 ----
-    post_params = _extract_params(post_match_data)
-    actual_h = post_params.get("actual_h") or post_params.get("predicted_h")
-    actual_a = post_params.get("actual_a") or post_params.get("predicted_a")
-
-    # 检测加时赛/点球大战
+    # 直接让 LLM 提取比分（比正则更可靠）
     is_extra_time = bool(re.search(r'extra.time|aet|加时|after.extra|ET\b', post_match_data, re.IGNORECASE))
     is_penalty_match = bool(re.search(r'penal|pen\b|shootout|点球', post_match_data.lower()))
 
-    # 淘汰赛：尝试分离 90 分钟比分和加时赛后比分
-    actual_90_h = actual_90_a = None
-    if is_extra_time or is_penalty_match:
-        # 常见格式: "1-1 after 90 minutes" / "90分钟 1-1" / "FT: 1-1" / "(1-1) aet 2-1"
-        et_patterns = [
-            r'(?:90.分钟|常规时间|FT|full.time|after.90).*?(\d+)\s*[-:]\s*(\d+)',
-            r'\((\d+)\s*[-:]\s*(\d+)\)\s*(?:aet|a\.e\.t|加时|extra.time)',
-        ]
-        for pat in et_patterns:
-            m90 = re.search(pat, post_match_data, re.IGNORECASE)
-            if m90:
-                actual_90_h, actual_90_a = int(m90.group(1)), int(m90.group(2))
-                break
+    actual_h = actual_a = None
+    try:
+        score_prompt = (
+            "从赛后报告中提取90分钟常规时间的最终比分。仅输出JSON: {\"actual_h\":2,\"actual_a\":1}\n"
+            "报告：\n" + post_match_data[:4000]
+        )
+        score_resp = requests.post(URL,
+            headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+            json={"model": "deepseek-chat", "messages": [{"role":"user","content":score_prompt}],
+                  "max_tokens": 100, "temperature": 0.0},
+            timeout=15
+        )
+        if "error" not in score_resp.json():
+            score_text = score_resp.json()["choices"][0]["message"].get("content", "")
+            sm = re.search(r'\{[\s\S]*\}', score_text)
+            if sm:
+                sp = json.loads(sm.group())
+                actual_h = sp.get("actual_h")
+                actual_a = sp.get("actual_a")
+    except Exception:
+        pass
 
+    # 回退：正则
     if actual_h is None or actual_a is None:
-        # 去括号，防止点球比分 ("1-1 (4-2 pens)") 干扰90分钟比分提取
         clean = re.sub(r'\([^)]*\d+[^)]*\)', '', post_match_data)
         scores = re.findall(r'(\d+)\s*[-:]\s*(\d+)', clean)
-        if scores:
-            actual_h, actual_a = int(scores[0][0]), int(scores[0][1])
-        else:
-            scores = re.findall(r'(\d+)\s*[-:]\s*(\d+)', post_match_data)
-            actual_h, actual_a = (int(scores[0][0]), int(scores[0][1])) if scores else (0, 0)
+        actual_h, actual_a = (int(scores[0][0]), int(scores[0][1])) if scores else (0, 0)
 
-    # 校准用实际比分：优先 90 分钟比分（淘汰赛），否则用提取到的比分
-    cal_h = actual_90_h if actual_90_h is not None else actual_h
-    cal_a = actual_90_a if actual_90_a is not None else actual_a
+    cal_h, cal_a = actual_h, actual_a
     if cal_h is None or cal_a is None:
         cal_h, cal_a = 0, 0
 
