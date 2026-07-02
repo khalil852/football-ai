@@ -976,17 +976,13 @@ _ANALYSIS_FROM_JSON_PROMPT = (
     "- 报告结构如下（总分不超过 400 字）:\n"
     "\n"
     "### 🎯 推演比分\n"
-    "**主场 X - Y 客场**\n"
+    "**(球队A)X:X(球队B)**  90分钟常规时间\n"
+    "例: (法国)1:1(塞内加尔)\n"
     "\n"
-    "[如果是淘汰赛且推演平局，必须在90分钟比分下方增加:]\n"
-    "### ⏱ 加时赛\n"
-    "**X - Y**\n"
-    "[如果加时赛仍是平局，继续增加:]\n"
-    "### 🎯 点球大战\n"
-    "**X - Y (点球比分，如 4-3)**\n"
-    "[最后一行:]\n"
-    "### 🏆 最终晋级\n"
-    "**[球队名] 晋级** (具体过程: 90分钟 X-Y, 加时 X-Y, 点球 X-Y)\n"
+    "[淘汰赛推演平局时, 在下方增加一行:]\n"
+    "**(球队A)X(X):(X)X(球队B)**  (含加时/点球)\n"
+    "例: (法国)1(3):(4)1(塞内加尔)\n"
+    "注: 括号内为点球比分, 4-3\n"
     "\n"
     "## 教练意图评级\n"
     "| 球队 | 评级 | 依据 |\n"
@@ -1741,20 +1737,20 @@ if st.session_state.get("math_json"):
     dr = mj.get("平局", "?")
     aw = mj.get("客胜", "?")
     conf = mj.get("模型置信度", "?")
+    # 格式化: (法国)1:1(塞内加尔)
+    score_compact = score.replace("-", ":")
+    display_score = f"({home}){score_compact}({away})"
+    et_score = mj.get("加时赛比分", "")
+    pen_score = mj.get("点球比分", "")
+    if pen_score:
+        pen_compact = pen_score.replace("-", ":")
+        display_score += f" 加时/点球 ({home}){pen_compact}({away})"
     st.markdown(f"""
     <div class="score-card">
-        <div class="teams">{home} vs {away}</div>
-        <div class="score">{score}</div>
+        <div class="score">{display_score}</div>
         <div class="probs">{hw} | {dr} | {aw} &nbsp; 置信度 {conf}</div>
     </div>
     """, unsafe_allow_html=True)
-    if mj.get("主队晋级概率"):
-        extra_line = ""
-        if mj.get("加时赛比分"):
-            extra_line += f" 加时 {mj['加时赛比分']}"
-        if mj.get("点球比分"):
-            extra_line += f" 点球 {mj['点球比分']}"
-        st.markdown(f"🏆 主队 {mj.get('主队晋级概率','')} / 客队 {mj.get('客队晋级概率','')}{extra_line}")
 
 if st.session_state.search_report:
     with st.expander("📡 信息雷达：赛前数据报告", expanded=False):
