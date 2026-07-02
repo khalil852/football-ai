@@ -931,13 +931,12 @@ _PARAM_EXTRACT_PROMPT = (
     "home_adv, odds_h, odds_d, odds_a"
 )
 
-def _extract_params(search_report: str, laws: list = None) -> dict:
+def _extract_params(search_report: str, laws: list = None, match_query: str = "") -> dict:
     """提取参数：规则引擎（确定性）+ LLM（λ/赔率）"""
     params = {}
 
     # Tier 1: 规则引擎 + 教练库（零 LLM 成本）
-    rule_result = _run_law_engine(search_report, laws or [],
-                                  st.session_state.get("current_match", ""))
+    rule_result = _run_law_engine(search_report, laws or [], match_query)
     rule_merged = rule_result.get("merged_modifiers", {})
     params["merged_modifiers"] = rule_merged
     params["triggered"] = rule_result.get("triggered", [])
@@ -1668,7 +1667,7 @@ if st.button("⚡ 一键推演", use_container_width=True, type="primary",
 
         _st.info("🧮 正在提取参数并运行数学引擎...（预计 20-30s）")
         try:
-            params = _extract_params(search_result, laws_data.get("laws",[]))
+            params = _extract_params(search_result, laws_data.get("laws",[]), match)
             def ok(key, d=1.0):
                 try: v = float(params.get(key,d))
                 except: v = d
