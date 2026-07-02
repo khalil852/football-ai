@@ -1174,8 +1174,9 @@ def save_record(match, search_report, analysis_report):
     try:
         supabase.table("history").insert(record).execute()
     except Exception:
-        # training_mode 列可能不存在（旧数据库），去掉后重试
-        record.pop("training_mode", None)
+        # 旧数据库可能缺少某些列，逐个移除后重试
+        for col in ("training_mode", "predicted_score"):
+            record.pop(col, None)
         supabase.table("history").insert(record).execute()
 
 def load_history():
