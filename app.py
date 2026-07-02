@@ -1673,15 +1673,25 @@ if st.button("⚡ 一键推演", use_container_width=True, type="primary",
                 except: v = d
                 return max(0.7,min(1.3,v)) if key not in ("lam_h_initial","lam_a_initial","odds_h","odds_d","odds_a") else v
             merged = params.get("merged_modifiers",{})
-            mod = LambdaModifiers.from_merged(merged, home_adv=params.get("home_adv",False)) if merged else LambdaModifiers(attack=ok("attack"),defense=ok("defense"),tactical=ok("tactical"),coach_intent=ok("coach_intent"),scenario=ok("scenario"),home_adv=1.08 if params.get("home_adv",False) else 1.0)
+            mod = LambdaModifiers.from_merged(merged, home_adv=params.get("home_adv",False)) if merged else LambdaModifiers(attack=ok("attack"),defense=ok("defense"),tactical=ok("tactical"),coach_intent=ok("coach_intent"),scenario=ok("scenario"),home_adv=1.0)
             odds = None
             try:
                 oh,od,oa = float(params.get("odds_h",0)),float(params.get("odds_d",0)),float(params.get("odds_a",0))
                 if oh and od and oa: odds=(oh,od,oa)
             except: pass
             h0 = max(0.8,min(4.0,ok("lam_h_initial",1.5)))
+            # 按用户输入的顺序当主/客队（世界杯无主客场）
+            user_teams = _parse_teams(match)
+            if user_teams:
+                home_team, away_team = user_teams[0], user_teams[1]
+            else:
+                home_team = params.get("home_team", "")
+                away_team = params.get("away_team", "")
+
             a0 = max(0.8,min(4.0,ok("lam_a_initial",1.2)))
-            pred = predict_match(home=params.get("home_team",""),away=params.get("away_team",""),lam_h0=h0,lam_a0=a0,mod=mod,odds=odds,lam_c=ok("lam_c",0.01),phi=ok("phi",0.20),is_knockout=is_knockout)
+            pred = predict_match(home=home_team, away=away_team,
+                               lam_h0=h0, lam_a0=a0, mod=mod, odds=odds,
+                               lam_c=ok("lam_c",0.01), phi=ok("phi",0.20), is_knockout=is_knockout)
             st.session_state.math_prediction=pred; pred.confidence*=mod.confidence
             mi = {k:getattr(mod,k) for k in ("attack","defense","tactical","coach_intent","scenario","home_adv","confidence")}; mi.update(mod._extra)
             ef = {}
