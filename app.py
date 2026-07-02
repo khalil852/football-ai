@@ -1319,8 +1319,13 @@ def calibrate_record(record, max_attempts=3):
     if not pred and record.get("predicted_score"):
         pred_parts = record["predicted_score"].split("-")
         if len(pred_parts) == 2:
-            pred = MatchPrediction(locked_h=int(pred_parts[0]), locked_a=int(pred_parts[1]),
-                                   home_win=0.5, draw=0.25, away_win=0.25, is_knockout=False)
+            ph, pa = int(pred_parts[0]), int(pred_parts[1])
+            # 根据推演比分推断胜负偏向
+            if ph > pa:      hw, dw, aw = 0.6, 0.24, 0.16
+            elif ph == pa:   hw, dw, aw = 0.30, 0.45, 0.25
+            else:            hw, dw, aw = 0.16, 0.24, 0.6
+            pred = MatchPrediction(locked_h=ph, locked_a=pa,
+                                   home_win=hw, draw=dw, away_win=aw, is_knockout=False)
     if pred and cal_h is not None and cal_a is not None:
         # 淘汰赛：判断实际晋级方
         detected_adv = None
@@ -1403,7 +1408,7 @@ def calibrate_record(record, max_attempts=3):
 ## 输出
 报告结构:
 ### 准确率: {math_cal.accuracy_score if math_cal else '?'}/100
-<small>推演 {f'{pred.locked_h}-{pred.locked_a}' if pred else '暂无'} | 实际 {actual_h}-{actual_a} | 偏差 {math_cal.goal_deviation if math_cal else '?'}球</small>
+<small>推演 {f'{pred.locked_h}-{pred.locked_a}' if pred else '暂无'} | 实际 {cal_h}-{cal_a} | 偏差 {math_cal.goal_deviation if math_cal else '?'}球</small>
 
 ### 差异
 ✅ [被验证的逻辑, 每条≤1句]
