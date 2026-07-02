@@ -1163,6 +1163,7 @@ def call_deepseek(system_prompt, user_query, enable_search=False, search_mode="p
 def save_record(match, search_report, analysis_report):
     match_time = extract_match_time(search_report)
     is_training = st.session_state.get("training_mode", False)
+    pred = st.session_state.get("math_prediction")
     record = {
         "username": st.session_state.username,
         "match": match,
@@ -1172,6 +1173,7 @@ def save_record(match, search_report, analysis_report):
         "calibration": None,
         "match_time": match_time,
         "training_mode": is_training,
+        "predicted_score": f"{pred.locked_h}-{pred.locked_a}" if pred else None,
     }
     try:
         supabase.table("history").insert(record).execute()
@@ -1314,6 +1316,12 @@ def calibrate_record(record, max_attempts=3):
     # ---- 第三步：Python 数学引擎校准 ----
     math_cal = None
     pred = st.session_state.get("math_prediction")
+    # 从历史记录恢复推演比分
+    if not pred and record.get("predicted_score"):
+        pred_parts = record["predicted_score"].split("-")
+        if len(pred_parts) == 2:
+            pred = MatchPrediction(locked_h=int(pred_parts[0]), locked_a=int(pred_parts[1]),
+                                   home_win=0.5, draw=0.25, away_win=0.25, is_knockout=False)
     if pred and cal_h is not None and cal_a is not None:
         # 淘汰赛：判断实际晋级方
         detected_adv = None
